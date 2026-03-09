@@ -80,7 +80,7 @@ sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt update
 
 # CUDA Toolkit 설치
-sudo apt install -y cuda-toolkit-12-4
+sudo apt install -y cuda-toolkit-12-6
 
 # 환경변수 추가
 echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
@@ -185,6 +185,8 @@ pip install -r requirements.txt
 ComfyUI는 WAN 모델을 실행하는 **별도 서버**입니다. 프로젝트 코드와 다른 디렉토리에 설치합니다.
 
 ```bash
+# 기존의 animVenv 가상이라면 deactivate
+deactivate
 cd ~
 git clone https://github.com/comfyanonymous/ComfyUI.git
 cd ComfyUI
