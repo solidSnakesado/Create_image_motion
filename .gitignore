@@ -205,3 +205,36 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+*.pyc
+*.pyo
+animVenv/
+venv/
+.venv/
+
+# 환경 변수 (API 키)
+.env
+
+# 생성 결과물
+outputs/
+assets/sprites/
+
+# 백업
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# ComfyUI (별도 설치)
+ComfyUI/
+
+# 패키지
+cuda-keyring*.deb
+
+# 임시 파일
+temp.md
