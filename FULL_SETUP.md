@@ -185,6 +185,8 @@ pip install -r requirements.txt
 ComfyUI는 WAN 모델을 실행하는 **별도 서버**입니다. 프로젝트 코드와 다른 디렉토리에 설치합니다.
 
 ```bash
+# 기존의 animVenv 가상이라면 deactivate
+deactivate
 cd ~
 git clone https://github.com/comfyanonymous/ComfyUI.git
 cd ComfyUI
