@@ -80,7 +80,7 @@ sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt update
 
 # CUDA Toolkit 설치
-sudo apt install -y cuda-toolkit-12-4
+sudo apt install -y cuda-toolkit-12-6
 
 # 환경변수 추가
 echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
