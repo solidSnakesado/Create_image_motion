@@ -273,21 +273,25 @@ huggingface-cli download Comfy-Org/Wan_2.1_ComfyUI_repackaged \
 (huggingface-cli가 PATH에 없는 경우. Python 모듈로 직접 실행.)
 
 # (1) WAN UNet (~8GB)
+mkdir -p unet
 python -m huggingface_hub.cli download city96/Wan2.1-I2V-14B-480P-gguf \
     wan2.1-i2v-14b-480p-Q3_K_S.gguf \
     --local-dir unet/
 
 # (2) CLIP Vision (~1.2GB)
+mkdir -p clip_vision
 python -m huggingface_hub.cli download Comfy-Org/Wan_2.1_ComfyUI_repackaged \
     split_files/clip_vision/clip_vision_h.safetensors \
     --local-dir clip_vision/
 
 # (3) CLIP 텍스트 인코더 (~16GB)
+mkdir -p clip
 python -m huggingface_hub.cli download Comfy-Org/Wan_2.1_ComfyUI_repackaged \
     split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors \
     --local-dir clip/
 
 # (4) VAE (~300MB)
+mkdir -p vae
 python -m huggingface_hub.cli download Comfy-Org/Wan_2.1_ComfyUI_repackaged \
     split_files/vae/wan_2.1_vae.safetensors \
     --local-dir vae/
