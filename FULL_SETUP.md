@@ -214,6 +214,12 @@ cd ~
 git clone https://github.com/comfyanonymous/ComfyUI.git
 cd ComfyUI
 
+# ⚠️ ComfyUI 버전 고정 (필수)
+# 최신 버전(0.16.x)은 12GB VRAM 환경에서 생성 도중 85% 부근에서
+# GPU-Util 0%, VRAM 풀 상태로 행(hang)이 발생하는 메모리 관리 문제가 있음.
+# v0.15.1 (커밋 eb011733)은 12GB VRAM에서 정상 동작이 검증된 버전.
+git checkout eb011733
+
 # ComfyUI 전용 가상환경
 python3 -m venv venv
 source venv/bin/activate
@@ -594,6 +600,33 @@ Q3_K_S 모델(~8GB)은 VRAM 10GB 이상을 권장합니다.
 python main.py --listen --lowvram
 ```
 
+### ComfyUI 생성 중 85%에서 행(hang) 발생
+
+**증상:** 생성 진행률이 85% (17/20 steps) 부근에서 멈추고, `nvidia-smi` 확인 시
+VRAM이 거의 차있지만(~9500MB/12227MB) GPU-Util이 0%인 상태.
+
+**원인:** ComfyUI v0.16.x의 메모리 관리 방식이 12GB VRAM 환경에서 문제를 일으킵니다.
+WAN 모델 추론 중 VAE 디코드 단계에서 VRAM이 부족해지면, 이전 버전(v0.15.x)은
+모델을 자동으로 오프로드하여 공간을 확보했지만, v0.16.x에서는 이 과정에서
+교착 상태(deadlock)에 빠지는 것으로 보입니다.
+
+**해결:** ComfyUI를 검증된 버전(v0.15.1, 커밋 `eb011733`)으로 고정합니다.
+
+```bash
+cd ~/ComfyUI
+git checkout eb011733
+```
+
+이미 v0.16.x로 실행한 적이 있어 DB 에러가 발생하면:
+
+```bash
+rm ~/ComfyUI/user/comfyui.db ~/ComfyUI/user/comfyui.db.lock
+```
+
+그 후 ComfyUI를 재시작합니다.
+
+> 6단계에서 `git checkout eb011733`을 이미 실행했다면 이 문제는 발생하지 않습니다.
+
 ---
 
 ## 하드웨어 요구사항 요약
@@ -619,11 +652,14 @@ python main.py --listen --lowvram
 | CUDA Toolkit | 12.6 (V12.6.85) |
 | Python | 3.12.3 |
 | PyTorch | 2.12.0.dev+cu128 (nightly, Blackwell 최적화) |
-| ComfyUI | 0.16.4 (2026-03-09) |
+| ComfyUI | v0.15.1 커밋 `eb011733` (버전 고정 필수) |
 
 > ⚠️ RTX 50XX는 CUDA capability sm_120으로, PyTorch cu126 이하는 sm_90까지만 지원합니다.
 > 반드시 cu128 이상을 설치해야 하며, **nightly 버전(2.12.0.dev+)**을 권장합니다.
 > stable(2.10.0+cu128)은 동작하지만 최적화 부족으로 생성 속도가 약 50% 느립니다.
+>
+> ⚠️ ComfyUI v0.16.x는 12GB VRAM에서 생성 중 행(hang)이 발생합니다.
+> 반드시 v0.15.1(커밋 `eb011733`)로 고정해야 합니다.
 
 ---
 
