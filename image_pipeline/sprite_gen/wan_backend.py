@@ -327,6 +327,7 @@ class _ValidationStats:
         image_name:  str,
         result_type: str,
         issues:      list[str],
+        ai_issues:   list[str] | None = None,
         remedy:      str | None = None,
         remedy_detail: str | None = None,
     ) -> None:
@@ -337,6 +338,7 @@ class _ValidationStats:
             image_name:    이미지 식별자 (stem)
             result_type:   "metric_fail" | "ai_fail" | "success"
             issues:        실패 항목 리스트 (성공 시 빈 리스트)
+            ai_issues:     수치 실패 시 함께 발생한 AI 검증 이슈 (별도 추적)
             remedy:        보완 조치 종류
                            "seed_retry" | "ai_adjust" | "action_switch" | "soft_pass" | None
             remedy_detail: 보완 조치 상세 내용 (예: "fps:14→16, negative:身体晃动")
@@ -348,6 +350,7 @@ class _ValidationStats:
         self._current_records.append({
             "type": result_type,
             "issues": issues,
+            "ai_issues": ai_issues or [],
             "remedy": remedy,
             "remedy_detail": remedy_detail,
         })
@@ -357,6 +360,9 @@ class _ValidationStats:
         if result_type == "metric_fail":
             self._total_metric_fails += 1
             self._total_metric_items.update(issues)
+            # 수치 실패 시 함께 발생한 AI 이슈도 누적
+            if ai_issues:
+                self._total_ai_items.update(ai_issues)
         elif result_type == "ai_fail":
             self._total_ai_fails += 1
             self._total_ai_items.update(issues)
@@ -372,6 +378,12 @@ class _ValidationStats:
             self._current_records[-1]["remedy"] = remedy
             self._current_records[-1]["remedy_detail"] = detail
             self._total_remedies[remedy] += 1
+
+    def _update_last_ai_issues(self, ai_issues: list[str]) -> None:
+        """마지막 기록(수치 실패)에 AI 검증 이슈를 추가."""
+        if self._current_records and ai_issues:
+            self._current_records[-1]["ai_issues"] = ai_issues
+            self._total_ai_items.update(ai_issues)
 
     def print_image_summary(self, image_name: str) -> None:
         """현재 이미지의 검증 실패 비율을 로그로 출력."""
@@ -391,12 +403,21 @@ class _ValidationStats:
         for r in records:
             if r["type"] == "metric_fail":
                 metric_items.update(r["issues"])
+                # 수치 실패 시 함께 발생한 AI 이슈도 수집
+                if r.get("ai_issues"):
+                    ai_items.update(r["ai_issues"])
             elif r["type"] == "ai_fail":
                 ai_items.update(r["issues"])
             if r["remedy"]:
                 remedy_counts[r["remedy"]] += 1
 
         pct = lambda n, d=total: f"{n/d*100:.1f}%" if d > 0 else "0%"
+
+        # AI 이슈가 발생한 시도 수 (수치실패+AI이슈 or 순수 AI실패)
+        ai_issue_attempts = sum(
+            1 for r in records
+            if r["type"] == "ai_fail" or r.get("ai_issues")
+        )
 
         lines = [
             f"\n{'─'*60}",
@@ -407,6 +428,7 @@ class _ValidationStats:
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
 
         lines.append(f"    AI실패: {ai_fails} ({pct(ai_fails)})")
+        lines.append(f"    AI이슈 발생: {ai_issue_attempts}회 ({pct(ai_issue_attempts)})")
         for item, cnt in ai_items.most_common():
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
 
@@ -476,13 +498,16 @@ class _ValidationStats:
 
         for i, r in enumerate(records, 1):
             issues_str = ", ".join(r["issues"]) if r["issues"] else ""
+            ai_str = ""
+            if r.get("ai_issues"):
+                ai_str = f" [AI: {', '.join(r['ai_issues'])}]"
             remedy_str = ""
             if r["remedy"]:
                 remedy_str = f" → {r['remedy']}"
                 if r["remedy_detail"]:
                     remedy_str += f" ({r['remedy_detail']})"
             lines.append(
-                f"  attempt {i}: {r['type']:<12} | {issues_str:<45}{remedy_str}"
+                f"  attempt {i}: {r['type']:<12} | {issues_str:<40}{ai_str}{remedy_str}"
             )
 
         lines.append("  ---")
@@ -495,6 +520,8 @@ class _ValidationStats:
         for r in records:
             if r["type"] == "metric_fail":
                 metric_items.update(r["issues"])
+                if r.get("ai_issues"):
+                    ai_items.update(r["ai_issues"])
             elif r["type"] == "ai_fail":
                 ai_items.update(r["issues"])
             if r["remedy"]:
@@ -503,7 +530,12 @@ class _ValidationStats:
         for item, cnt in metric_items.most_common():
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
 
+        ai_issue_attempts = sum(
+            1 for r in records
+            if r["type"] == "ai_fail" or r.get("ai_issues")
+        )
         lines.append(f"    AI실패: {ai_fails} ({pct(ai_fails)})")
+        lines.append(f"    AI이슈 발생: {ai_issue_attempts}회 ({pct(ai_issue_attempts)})")
         for item, cnt in ai_items.most_common():
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
 
@@ -1739,6 +1771,10 @@ class WanBackend:
                     negative      = current_negative,
                 )
                 logger.info(f"  [AIValidator] {ai_result}")
+
+                # 수치 실패 기록에 AI 이슈도 추가
+                if ai_result.issues:
+                    self._stats._update_last_ai_issues(ai_result.issues)
 
                 # ── 연속 품질 실패 카운터 (수치 FAIL 경로) ──
                 if ai_result.issues and set(ai_result.issues) & QUALITY_ISSUES:
