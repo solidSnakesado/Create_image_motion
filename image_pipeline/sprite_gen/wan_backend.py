@@ -326,6 +326,9 @@ class _ValidationStats:
         self._total_remedies: Counter = Counter()
         self._total_images: int = 0
 
+        # 기존 파일에서 누적 통계 복원
+        self._restore_cumulative_from_file()
+
     def load_history(self, image_name: str | None = None) -> dict:
         """
         기존 validation_stats.txt를 파싱하여 이력 반환.
@@ -428,6 +431,42 @@ class _ValidationStats:
             }
 
         return result
+
+    def _restore_cumulative_from_file(self) -> None:
+        """기존 validation_stats.txt에서 누적 통계를 복원."""
+        history = self.load_history()
+        if not history["images"]:
+            return
+
+        for img_name, img_data in history["images"].items():
+            self._total_images += 1
+            for a in img_data["attempts"]:
+                self._total_attempts += 1
+                rtype = a["type"]
+                issues = a.get("issues", [])
+                ai_issues = a.get("ai_issues", [])
+                remedy = a.get("remedy")
+
+                if rtype == "metric_fail":
+                    self._total_metric_fails += 1
+                    self._total_metric_items.update(issues)
+                    if ai_issues:
+                        self._total_ai_items.update(ai_issues)
+                        self._total_ai_issue_attempts += 1
+                elif rtype == "ai_fail":
+                    self._total_ai_fails += 1
+                    self._total_ai_items.update(issues)
+                    self._total_ai_issue_attempts += 1
+                elif rtype == "success":
+                    self._total_success += 1
+
+                if remedy:
+                    self._total_remedies[remedy] += 1
+
+        logger.info(
+            f"  [통계] 기존 이력 복원: {self._total_images}장 "
+            f"{self._total_attempts}회 (파일: {self._file_path})"
+        )
 
     def record(
         self,
