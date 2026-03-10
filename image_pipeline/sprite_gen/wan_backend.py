@@ -372,6 +372,42 @@ class _ValidationStats:
         if remedy:
             self._total_remedies[remedy] += 1
 
+        # 매 시도마다 즉시 파일에 기록 (중간 중단 시에도 기록 보존)
+        self._append_attempt_to_file()
+
+    def _append_attempt_to_file(self) -> None:
+        """마지막 시도 결과를 즉시 파일에 기록."""
+        if not self._current_records:
+            return
+        r = self._current_records[-1]
+        attempt_num = len(self._current_records)
+
+        # 새 이미지 첫 시도면 헤더 추가
+        header = ""
+        if attempt_num == 1:
+            header = (
+                f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"IMAGE: {self._current_image}\n"
+            )
+
+        issues_str = ", ".join(r["issues"]) if r["issues"] else ""
+        ai_str = ""
+        if r.get("ai_issues"):
+            ai_str = f" [AI: {', '.join(r['ai_issues'])}]"
+        remedy_str = ""
+        if r.get("remedy"):
+            remedy_str = f" → {r['remedy']}"
+            if r.get("remedy_detail"):
+                remedy_str += f" ({r['remedy_detail']})"
+
+        line = f"  attempt {attempt_num}: {r['type']:<12} | {issues_str:<40}{ai_str}{remedy_str}\n"
+
+        try:
+            with open(self._file_path, "a", encoding="utf-8") as f:
+                f.write(header + line)
+        except Exception:
+            pass  # 즉시 저장 실패해도 최종 save_to_file()에서 재기록
+
     def _update_last_remedy(self, remedy: str, detail: str = "") -> None:
         """마지막 기록의 보완 조치를 업데이트."""
         if self._current_records:
@@ -478,7 +514,9 @@ class _ValidationStats:
         logger.info("\n".join(lines))
 
     def save_to_file(self) -> None:
-        """현재 이미지의 결과를 validation_stats.txt에 추가 기록."""
+        """현재 이미지의 요약 통계를 validation_stats.txt에 추가 기록.
+        개별 시도는 _append_attempt_to_file()에서 이미 즉시 기록됨.
+        """
         records = self._current_records
         if not records:
             return
@@ -490,27 +528,7 @@ class _ValidationStats:
 
         pct = lambda n, d=total: f"{n/d*100:.1f}%" if d > 0 else "0%"
 
-        lines = []
-        lines.append(
-            f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"IMAGE: {self._current_image}"
-        )
-
-        for i, r in enumerate(records, 1):
-            issues_str = ", ".join(r["issues"]) if r["issues"] else ""
-            ai_str = ""
-            if r.get("ai_issues"):
-                ai_str = f" [AI: {', '.join(r['ai_issues'])}]"
-            remedy_str = ""
-            if r["remedy"]:
-                remedy_str = f" → {r['remedy']}"
-                if r["remedy_detail"]:
-                    remedy_str += f" ({r['remedy_detail']})"
-            lines.append(
-                f"  attempt {i}: {r['type']:<12} | {issues_str:<40}{ai_str}{remedy_str}"
-            )
-
-        lines.append("  ---")
+        lines = ["  ---"]
         lines.append(f"  이미지 결과: 총 {total}회")
         lines.append(f"    수치실패: {metric_fails} ({pct(metric_fails)})")
 
@@ -524,7 +542,7 @@ class _ValidationStats:
                     ai_items.update(r["ai_issues"])
             elif r["type"] == "ai_fail":
                 ai_items.update(r["issues"])
-            if r["remedy"]:
+            if r.get("remedy"):
                 remedy_counts[r["remedy"]] += 1
 
         for item, cnt in metric_items.most_common():
