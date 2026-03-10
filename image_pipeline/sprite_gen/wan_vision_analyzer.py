@@ -45,6 +45,9 @@ class VisionAnalysisResult:
     positive:     str
     negative:     str
     reason:       str
+    pingpong:     bool = True    # True=왕복 루프, False=단방향 루프
+    bg_type:      str  = "solid" # "solid"=단색 배경, "scene"=장면 배경
+    bg_remove:    bool = True    # 배경 제거 여부
     from_llm:     bool = True
 
 
@@ -227,6 +230,38 @@ STEP 7 — FRAME COUNT
   RULE: When in doubt, choose SHORT over LONG.
   Fewer frames reduce generation artifacts and keep the loop tight.
 
+STEP 8 — LOOP TYPE & BACKGROUND
+  Analyze the image to determine:
+
+  A) PINGPONG (loop direction):
+     Determine whether the animation should play forward-then-backward (pingpong)
+     or forward-only (one-directional loop).
+
+     pingpong = true:
+       - Subject is stationary, facing front/side, doing IN-PLACE motion
+       - Motion is reciprocal (swing left→right, jump up→down, nod down→up)
+       - Examples: frog jumping, elephant trunk swaying, bird wing flapping, propeller spinning
+
+     pingpong = false:
+       - Subject is in a TRAVELING POSE (walking away, riding, running)
+       - Subject is seen from BEHIND in a moving-away pose
+       - Background suggests continuous movement (road, sky, corridor)
+       - Motion is directional and non-reciprocal (walking cycle, hair flowing in wind)
+       - Examples: person walking away, motorcycle riding, character running
+
+  B) BACKGROUND TYPE:
+     bg_type = "solid":
+       - Background is white, single color, or simple gradient
+       - No environmental elements (no road, sky, trees, buildings)
+
+     bg_type = "scene":
+       - Background contains environmental elements (road, sky, forest, room, city)
+       - Background is part of the content and should NOT be removed
+
+  C) BACKGROUND REMOVAL:
+     bg_remove = true:  when bg_type is "solid" (remove and make transparent)
+     bg_remove = false: when bg_type is "scene" (keep background as-is)
+
 OUTPUT FORMAT
 Respond ONLY with JSON. No text outside JSON. No markdown fences.
 
@@ -243,7 +278,10 @@ Respond ONLY with JSON. No text outside JSON. No markdown fences.
   "max_motion": <float 0.08-0.80>,
   "max_diff": <float max_motion*1.5>,
   "positive": "<중국어 positive 프롬프트, 60단어 이내>",
-  "negative": "<중국어 negative 프롬프트, 40단어 이내>"
+  "negative": "<중국어 negative 프롬프트, 40단어 이내>",
+  "pingpong": <true or false>,
+  "bg_type": "<solid or scene>",
+  "bg_remove": <true or false>
 }"""
 
 
@@ -372,6 +410,9 @@ class WanVisionAnalyzer:
             max_diff     = max_diff,
             positive     = positive,
             negative     = negative,
+            pingpong     = bool(data.get("pingpong", True)),
+            bg_type      = data.get("bg_type", "solid"),
+            bg_remove    = bool(data.get("bg_remove", True)),
             from_llm     = True,
         )
     def analyze_with_exclusion(

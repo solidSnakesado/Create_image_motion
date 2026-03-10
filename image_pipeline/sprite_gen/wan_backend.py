@@ -1441,7 +1441,7 @@ def build_wan_workflow(
                 "pix_fmt":         "yuv420p",
                 "crf":             19,
                 "save_metadata":   True,
-                "pingpong":        False,
+                "pingpong":        pingpong,
                 "save_output":     True,
                 "trim_to_audio":   False,
             },
@@ -1544,6 +1544,8 @@ class WanBackend:
         logger.info(f"  → 근거: {analysis.reason}")
         logger.info(f"  → fps={analysis.frame_rate} "
                     f"motion={analysis.min_motion}~{analysis.max_motion}")
+        logger.info(f"  → pingpong={analysis.pingpong} "
+                    f"bg_type={analysis.bg_type} bg_remove={analysis.bg_remove}")
 
         # ── Step 2: 이미지 업로드 ──────────────────────────────────────────
         uploaded_name = self.comfyui.upload_image(image_path)
@@ -1636,7 +1638,7 @@ class WanBackend:
                     out_dir       = out_dir,
                     stem          = stem,
                     attempt       = attempt,
-                    pingpong      = True,
+                    pingpong      = analysis.pingpong,
                     # mask_name 미전달: SetLatentNoiseMask는 WAN video latent와 비호환
                 )
             except Exception as e:
@@ -1693,21 +1695,24 @@ class WanBackend:
                         except Exception as e:
                             logger.warning(f"  ⚠ 후처리 합성 실패 (원본 영상 유지): {e}")
 
-                    # ── 배경 제거 후처리 (성공 시에만) ─────────────
-                    try:
-                        transparent_dir = os.path.join(
-                            out_dir, f"{stem}_transparent"
-                        )
-                        self.bg_remover.remove_background(
-                            video_path  = video_path,
-                            output_dir  = transparent_dir,
-                            output_apng = True,
-                            output_webm = True,
-                            fps         = current_fps,
-                        )
-                        logger.info(f"  → 배경 제거 완료: {transparent_dir}")
-                    except Exception as e:
-                        logger.warning(f"  ⚠ 배경 제거 실패 (무시): {e}")
+                    # ── 배경 제거 후처리 (성공 시 + bg_remove=True인 경우만) ──
+                    if analysis.bg_remove:
+                        try:
+                            transparent_dir = os.path.join(
+                                out_dir, f"{stem}_transparent"
+                            )
+                            self.bg_remover.remove_background(
+                                video_path  = video_path,
+                                output_dir  = transparent_dir,
+                                output_apng = True,
+                                output_webm = True,
+                                fps         = current_fps,
+                            )
+                            logger.info(f"  → 배경 제거 완료: {transparent_dir}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠ 배경 제거 실패 (무시): {e}")
+                    else:
+                        logger.info(f"  → 배경 제거 스킵 (bg_type={analysis.bg_type})")
 
                     # 성공 결과 저장 후 루프 계속 (MAX_RETRIES 전부 소진)
                     result = WanResult(
