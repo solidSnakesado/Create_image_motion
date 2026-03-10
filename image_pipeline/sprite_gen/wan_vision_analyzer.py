@@ -237,17 +237,17 @@ STEP 8 — LOOP TYPE & BACKGROUND
      Determine whether the animation should play forward-then-backward (pingpong)
      or forward-only (one-directional loop).
 
-     pingpong = true:
-       - Subject is stationary, facing front/side, doing IN-PLACE motion
-       - Motion is reciprocal (swing left→right, jump up→down, nod down→up)
-       - Examples: frog jumping, elephant trunk swaying, bird wing flapping, propeller spinning
+     ━━━ CORE PRINCIPLE ━━━
+     Ask yourself: "If this image were a real moment frozen in time,
+     would the subject RETURN to the starting state, or CONTINUE forward?"
 
-     pingpong = false:
-       - Subject is in a TRAVELING POSE (walking away, riding, running)
-       - Subject is seen from BEHIND in a moving-away pose
-       - Background suggests continuous movement (road, sky, corridor)
-       - Motion is directional and non-reciprocal (walking cycle, hair flowing in wind)
-       - Examples: person walking away, motorcycle riding, character running
+     pingpong = false (continue forward):
+       The image implies ongoing movement through space or time.
+       If you played it backward, it would look unnatural.
+
+     pingpong = true (return to start):
+       The image implies a stationary subject doing a repeating motion.
+       Playing it forward then backward would look natural.
 
   B) BACKGROUND TYPE:
      bg_type = "solid":

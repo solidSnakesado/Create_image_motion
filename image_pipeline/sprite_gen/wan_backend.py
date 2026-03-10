@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # 설정
 # ─────────────────────────────────────────────────────────────
 
-MAX_RETRIES = 7
+MAX_RETRIES = 5
 
 COMFYUI_URL   = os.environ.get("COMFYUI_URL",   "http://127.0.0.1:8188")
 WAN_MODEL     = os.environ.get("WAN_MODEL",     "wan2.1-i2v-14b-480p-Q3_K_S.gguf")
@@ -1576,18 +1576,28 @@ class WanBackend:
         current_frame_count = analysis.frame_count
         current_scale       = 0.65
 
-        # 배경 보호 문구 항상 강제 추가 (중간 어두워짐 방지)
-        BG_POSITIVE = (
-            "纯白色背景，整个动画过程中背景始终保持白色，背景干净无杂质，"
-            "始终保持恒定的亮度，没有闪烁，画面明亮清晰，边缘锐利，无残影"
-        )
-        # BG_NEGATIVE: 중국어로 작성 (WAN은 중국어 학습 모델)
-        # 背景变灰 추가 — 회색 배경(attempt02/04 패턴) 명시 커버
-        BG_NEGATIVE = (
-            "背景变色，背景变暗，背景变黑，背景变灰，背景变黄，"  # noqa: RUF001
-            "背景变紫，背景颜色偏移，非白色背景，"
-            "黑屏，阴影遮盖，滤镜感，曝光不足，画面闪烁"
-        )
+        # 배경 보호 문구: bg_type=solid일 때만 추가
+        # bg_type=scene이면 배경이 장면이므로 흰색 강제 문구 불필요
+        if analysis.bg_type == "solid":
+            BG_POSITIVE = (
+                "纯白色背景，整个动画过程中背景始终保持白色，背景干净无杂质，"
+                "始终保持恒定的亮度，没有闪烁，画面明亮清晰，边缘锐利，无残影"
+            )
+            BG_NEGATIVE = (
+                "背景变色，背景变暗，背景变黑，背景变灰，背景变黄，"  # noqa: RUF001
+                "背景变紫，背景颜色偏移，非白色背景，"
+                "黑屏，阴影遮盖，滤镜感，曝光不足，画面闪烁"
+            )
+        else:
+            # scene 배경: 배경 유지 문구로 대체
+            BG_POSITIVE = (
+                "背景保持不变，整个动画过程中背景始终保持原始状态，"
+                "画面明亮清晰，边缘锐利，无残影"
+            )
+            BG_NEGATIVE = (
+                "背景消失，背景模糊，背景扭曲，"
+                "黑屏，画面闪烁"
+            )
         # 베이스 프롬프트: 액션 전환 시에만 교체, 중간에 누적하지 않음
         base_positive = BG_POSITIVE + ", " + analysis.positive
         base_negative = analysis.negative + ", " + BG_NEGATIVE
