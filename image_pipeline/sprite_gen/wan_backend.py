@@ -38,6 +38,8 @@ import random
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -275,6 +277,264 @@ def preprocess_image_simple(
 
 
 # ─────────────────────────────────────────────────────────────
+# 검증 실패 통계 추적기
+# ─────────────────────────────────────────────────────────────
+
+class _ValidationStats:
+    """
+    검증 실패 항목 + 보완 조치를 이미지별·누적으로 추적하고 파일에 기록.
+
+    기록 형식 (validation_stats.txt):
+        [2026-03-10 12:34:56] IMAGE: frog_processed
+          attempt 1: metric_fail | no_motion, too_slow       → seed_retry
+          attempt 2: metric_fail | ghosting                  → ai_adjust (fps:14→16, negative:...)
+          attempt 3: ai_fail    | unnatural_movement         → ai_adjust (negative:...)
+          attempt 4: ai_fail    | character_inconsistency    → action_switch (귀 flap)
+          attempt 5: success    |
+          ---
+          이미지 결과: 총 5회
+            수치실패: 2 (40.0%)
+              - no_motion: 1 (20.0%)
+              - too_slow: 1 (20.0%)
+              - ghosting: 1 (20.0%)
+            AI실패: 2 (40.0%)
+              - unnatural_movement: 1 (20.0%)
+              - character_inconsistency: 1 (20.0%)
+            성공: 1 (20.0%)
+          보완 조치:
+            - seed_retry: 1 (25.0%)
+            - ai_adjust: 2 (50.0%)
+            - action_switch: 1 (25.0%)
+    """
+
+    def __init__(self, output_dir: str) -> None:
+        self._file_path = os.path.join(output_dir, "validation_stats.txt")
+        # 현재 이미지용 기록
+        self._current_image: str = ""
+        self._current_records: list[dict] = []
+        # 전체 누적 통계
+        self._total_attempts: int = 0
+        self._total_metric_fails: int = 0
+        self._total_ai_fails: int = 0
+        self._total_success: int = 0
+        self._total_metric_items: Counter = Counter()
+        self._total_ai_items: Counter = Counter()
+        self._total_remedies: Counter = Counter()
+        self._total_images: int = 0
+
+    def record(
+        self,
+        image_name:  str,
+        result_type: str,
+        issues:      list[str],
+        remedy:      str | None = None,
+        remedy_detail: str | None = None,
+    ) -> None:
+        """
+        한 번의 시도 결과를 기록.
+
+        Args:
+            image_name:    이미지 식별자 (stem)
+            result_type:   "metric_fail" | "ai_fail" | "success"
+            issues:        실패 항목 리스트 (성공 시 빈 리스트)
+            remedy:        보완 조치 종류
+                           "seed_retry" | "ai_adjust" | "action_switch" | "soft_pass" | None
+            remedy_detail: 보완 조치 상세 내용 (예: "fps:14→16, negative:身体晃动")
+        """
+        if self._current_image != image_name:
+            self._current_image = image_name
+            self._current_records = []
+
+        self._current_records.append({
+            "type": result_type,
+            "issues": issues,
+            "remedy": remedy,
+            "remedy_detail": remedy_detail,
+        })
+
+        # 누적 카운터 업데이트
+        self._total_attempts += 1
+        if result_type == "metric_fail":
+            self._total_metric_fails += 1
+            self._total_metric_items.update(issues)
+        elif result_type == "ai_fail":
+            self._total_ai_fails += 1
+            self._total_ai_items.update(issues)
+        elif result_type == "success":
+            self._total_success += 1
+
+        if remedy:
+            self._total_remedies[remedy] += 1
+
+    def _update_last_remedy(self, remedy: str, detail: str = "") -> None:
+        """마지막 기록의 보완 조치를 업데이트."""
+        if self._current_records:
+            self._current_records[-1]["remedy"] = remedy
+            self._current_records[-1]["remedy_detail"] = detail
+            self._total_remedies[remedy] += 1
+
+    def print_image_summary(self, image_name: str) -> None:
+        """현재 이미지의 검증 실패 비율을 로그로 출력."""
+        records = self._current_records
+        if not records:
+            return
+
+        self._total_images += 1
+        total = len(records)
+        metric_fails = sum(1 for r in records if r["type"] == "metric_fail")
+        ai_fails = sum(1 for r in records if r["type"] == "ai_fail")
+        successes = sum(1 for r in records if r["type"] == "success")
+
+        metric_items: Counter = Counter()
+        ai_items: Counter = Counter()
+        remedy_counts: Counter = Counter()
+        for r in records:
+            if r["type"] == "metric_fail":
+                metric_items.update(r["issues"])
+            elif r["type"] == "ai_fail":
+                ai_items.update(r["issues"])
+            if r["remedy"]:
+                remedy_counts[r["remedy"]] += 1
+
+        pct = lambda n, d=total: f"{n/d*100:.1f}%" if d > 0 else "0%"
+
+        lines = [
+            f"\n{'─'*60}",
+            f"  [통계] {image_name} — 총 {total}회 시도",
+            f"    수치실패: {metric_fails} ({pct(metric_fails)})",
+        ]
+        for item, cnt in metric_items.most_common():
+            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
+
+        lines.append(f"    AI실패: {ai_fails} ({pct(ai_fails)})")
+        for item, cnt in ai_items.most_common():
+            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
+
+        lines.append(f"    성공: {successes} ({pct(successes)})")
+
+        if remedy_counts:
+            remedy_total = sum(remedy_counts.values())
+            lines.append(f"    보완 조치: (총 {remedy_total}회)")
+            for rem, cnt in remedy_counts.most_common():
+                lines.append(f"      - {rem}: {cnt} ({pct(cnt, remedy_total)})")
+
+        lines.append(f"{'─'*60}")
+        logger.info("\n".join(lines))
+
+    def print_cumulative_summary(self) -> None:
+        """전체 누적 통계를 로그로 출력."""
+        total = self._total_attempts
+        if total == 0:
+            return
+
+        pct = lambda n, d=total: f"{n/d*100:.1f}%" if d > 0 else "0%"
+
+        lines = [
+            f"\n{'═'*60}",
+            f"  [누적 통계] 이미지 {self._total_images}장 | 총 {total}회 시도",
+            f"    수치실패: {self._total_metric_fails} ({pct(self._total_metric_fails)})",
+        ]
+        for item, cnt in self._total_metric_items.most_common():
+            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
+
+        lines.append(
+            f"    AI실패: {self._total_ai_fails} ({pct(self._total_ai_fails)})"
+        )
+        for item, cnt in self._total_ai_items.most_common():
+            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
+
+        lines.append(f"    성공: {self._total_success} ({pct(self._total_success)})")
+
+        if self._total_remedies:
+            remedy_total = sum(self._total_remedies.values())
+            lines.append(f"    보완 조치: (총 {remedy_total}회)")
+            for rem, cnt in self._total_remedies.most_common():
+                pct_r = lambda n: f"{n/remedy_total*100:.1f}%" if remedy_total > 0 else "0%"
+                lines.append(f"      - {rem}: {cnt} ({pct_r(cnt)})")
+
+        lines.append(f"{'═'*60}")
+        logger.info("\n".join(lines))
+
+    def save_to_file(self) -> None:
+        """현재 이미지의 결과를 validation_stats.txt에 추가 기록."""
+        records = self._current_records
+        if not records:
+            return
+
+        total = len(records)
+        metric_fails = sum(1 for r in records if r["type"] == "metric_fail")
+        ai_fails = sum(1 for r in records if r["type"] == "ai_fail")
+        successes = sum(1 for r in records if r["type"] == "success")
+
+        pct = lambda n, d=total: f"{n/d*100:.1f}%" if d > 0 else "0%"
+
+        lines = []
+        lines.append(
+            f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"IMAGE: {self._current_image}"
+        )
+
+        for i, r in enumerate(records, 1):
+            issues_str = ", ".join(r["issues"]) if r["issues"] else ""
+            remedy_str = ""
+            if r["remedy"]:
+                remedy_str = f" → {r['remedy']}"
+                if r["remedy_detail"]:
+                    remedy_str += f" ({r['remedy_detail']})"
+            lines.append(
+                f"  attempt {i}: {r['type']:<12} | {issues_str:<45}{remedy_str}"
+            )
+
+        lines.append("  ---")
+        lines.append(f"  이미지 결과: 총 {total}회")
+        lines.append(f"    수치실패: {metric_fails} ({pct(metric_fails)})")
+
+        metric_items: Counter = Counter()
+        ai_items: Counter = Counter()
+        remedy_counts: Counter = Counter()
+        for r in records:
+            if r["type"] == "metric_fail":
+                metric_items.update(r["issues"])
+            elif r["type"] == "ai_fail":
+                ai_items.update(r["issues"])
+            if r["remedy"]:
+                remedy_counts[r["remedy"]] += 1
+
+        for item, cnt in metric_items.most_common():
+            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
+
+        lines.append(f"    AI실패: {ai_fails} ({pct(ai_fails)})")
+        for item, cnt in ai_items.most_common():
+            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
+
+        lines.append(f"    성공: {successes} ({pct(successes)})")
+
+        if remedy_counts:
+            remedy_total = sum(remedy_counts.values())
+            lines.append(f"    보완 조치: (총 {remedy_total}회)")
+            for rem, cnt in remedy_counts.most_common():
+                pct_r = f"{cnt/remedy_total*100:.1f}%" if remedy_total > 0 else "0%"
+                lines.append(f"      - {rem}: {cnt} ({pct_r})")
+
+        # 누적 통계
+        cum_total = self._total_attempts
+        cum_pct = lambda n: f"{n/cum_total*100:.1f}%" if cum_total > 0 else "0%"
+        lines.append(
+            f"  [누적] 이미지 {self._total_images}장 | 총 {cum_total}회 | "
+            f"수치 {self._total_metric_fails} ({cum_pct(self._total_metric_fails)}) | "
+            f"AI {self._total_ai_fails} ({cum_pct(self._total_ai_fails)}) | "
+            f"성공 {self._total_success} ({cum_pct(self._total_success)})"
+        )
+
+        try:
+            with open(self._file_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            logger.info(f"  [통계] 파일 저장: {self._file_path}")
+        except Exception as e:
+            logger.warning(f"  [통계] 파일 저장 실패: {e}")
+
+
+# ─────────────────────────────────────────────────────────────
 # ComfyUI API 클라이언트
 # ─────────────────────────────────────────────────────────────
 
@@ -491,6 +751,61 @@ class ComfyUIClient:
 
         logger.info(f"[ComfyUI] 비디오 다운로드 완료: {output_path}")
         return output_path
+
+    def free_memory(self) -> None:
+        """
+        ComfyUI VRAM 초기화.
+        모든 모델을 언로드하고 CUDA 캐시를 비움.
+        12GB VRAM 환경에서 연속 생성 시 VRAM 누수 누적으로
+        행(hang)이 발생하는 문제를 방지.
+        """
+        try:
+            # 초기화 전 VRAM 사용량 조회
+            vram_before = self._get_vram_usage()
+
+            data = json.dumps({
+                "unload_models": True,
+                "free_memory": True,
+            }).encode()
+            req = urllib.request.Request(
+                f"{self.base_url}/free",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=10)
+
+            # 초기화 후 VRAM 사용량 조회 (약간 대기 후)
+            time.sleep(1)
+            vram_after = self._get_vram_usage()
+
+            if vram_before and vram_after:
+                freed = vram_before["used"] - vram_after["used"]
+                logger.info(
+                    f"[ComfyUI] VRAM 초기화 완료 — "
+                    f"전: {vram_before['used']}MB / {vram_before['total']}MB → "
+                    f"후: {vram_after['used']}MB / {vram_after['total']}MB "
+                    f"(해제: {freed}MB)"
+                )
+            else:
+                logger.info("[ComfyUI] VRAM 초기화 완료 (모델 언로드 + 캐시 클리어)")
+        except Exception as e:
+            logger.warning(f"[ComfyUI] VRAM 초기화 실패 (생성에는 영향 없음): {e}")
+
+    def _get_vram_usage(self) -> dict | None:
+        """nvidia-smi로 현재 VRAM 사용량 조회."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                used, total = result.stdout.strip().split(", ")
+                return {"used": int(used), "total": int(total)}
+        except Exception:
+            pass
+        return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1045,6 +1360,9 @@ class WanBackend:
         self.output_dir   = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
+        # ── 검증 실패 통계 추적기 ──────────────────────────────
+        self._stats = _ValidationStats(output_dir=output_dir)
+
         # 워크플로우 경로 결정 (인자 > 환경변수 > 기본 경로 순)
         global WAN_WORKFLOW_PATH
         if workflow_path:
@@ -1210,11 +1528,6 @@ class WanBackend:
                 logger.info(f"  [AIValidator] {ai_result}")
 
                 # 수치 검증 통과 후 AI 판정 완화 처리
-                # background_color_change: 배경은 후처리(bg_remover)로 제거됨
-                #   수치 validator가 "배경만 변색"으로 PASS한 케이스에서
-                #   AI가 여전히 background_color_change를 잡을 경우 안전망
-                # no_motion: SOFT 처리 안 함 — AI가 no_motion이면 실제로 안 보이는 것
-                #   수치 motion 값이 임계값 바로 위여도 육안으로는 정지처럼 보일 수 있음
                 SOFT_ISSUES = {"background_color_change"}
                 if not ai_result.passed and ai_result.issues:
                     hard_issues = [i for i in ai_result.issues if i not in SOFT_ISSUES]
@@ -1224,8 +1537,15 @@ class WanBackend:
                             f"→ 수치 검증 통과했으므로 PASS 처리"
                         )
                         ai_result.passed = True
+                        self._stats.record(stem, "success", [], remedy="soft_pass",
+                                           remedy_detail=f"soft_issues={ai_result.issues}")
 
                 if ai_result.passed:
+                    # soft_pass에서 이미 기록한 경우가 아니면 성공 기록
+                    last_rec = (self._stats._current_records[-1]
+                                if self._stats._current_records else None)
+                    if not (last_rec and last_rec.get("remedy") == "soft_pass"):
+                        self._stats.record(stem, "success", [])
                     logger.info(f"\n  ✅ AI 검증 통과! (시도 {attempt}회)")
                     logger.info(f"  → {video_path}")
 
@@ -1271,6 +1591,8 @@ class WanBackend:
                     # 프롬프트/파라미터는 그대로 유지하며 다음 시도 진행
                     continue
                 else:
+                    # AI 검증 실패 기록
+                    self._stats.record(stem, "ai_fail", ai_result.issues or [])
                     logger.info(f"  ❌ AI 검증 실패: {ai_result.issues}")
                     logger.info(f"  [보존] 실패 영상: {video_path}")
 
@@ -1312,6 +1634,9 @@ class WanBackend:
                                 f"| moving={new_analysis.moving_parts} "
                                 f"| frames={new_analysis.frame_count}"
                             )
+                            self._stats._update_last_remedy(
+                                "action_switch", f"→ {new_analysis.action_desc[:30]}"
+                            )
                             # 마스크도 새 moving_zone 기준으로 재생성
                             if mask_path_local:
                                 try:
@@ -1328,20 +1653,29 @@ class WanBackend:
                         continue  # 프롬프트 수정 없이 새 액션으로 바로 재시도
 
                     # AI가 결정한 수치 적용
+                    adjust_details = []
                     if ai_result.frame_rate is not None:
                         logger.info(f"  [AI조정] fps: {current_fps} → {ai_result.frame_rate}")
+                        adjust_details.append(f"fps:{current_fps}→{ai_result.frame_rate}")
                         current_fps = ai_result.frame_rate
                     if ai_result.scale is not None:
                         logger.info(f"  [AI조정] scale: {current_scale} → {ai_result.scale}")
+                        adjust_details.append(f"scale:{current_scale}→{ai_result.scale}")
                         current_scale = ai_result.scale
                     if ai_result.positive:
                         logger.info(f"  [AI조정] positive 교체: {ai_result.positive}")
+                        adjust_details.append(f"pos:{ai_result.positive[:20]}")
                         adj_positive = ai_result.positive  # 누적 없이 교체
                     if ai_result.negative:
                         logger.info(f"  [AI조정] negative 교체: {ai_result.negative}")
+                        adjust_details.append(f"neg:{ai_result.negative[:20]}")
                         adj_negative = ai_result.negative  # 누적 없이 교체
+                    if adjust_details:
+                        self._stats._update_last_remedy("ai_adjust", ", ".join(adjust_details))
                     current_positive, current_negative = build_prompts()
             else:
+                # 수치 검증 실패 기록
+                self._stats.record(stem, "metric_fail", validation.failed_checks)
                 logger.info(
                     f"  ❌ 수치 검증 실패: {validation.failed_checks}"
                 )
@@ -1359,6 +1693,7 @@ class WanBackend:
                     )
                     if attempt == 1 or consecutive_nomotion_fails < CONSECUTIVE_FAIL_THRESHOLD:
                         logger.info("  → seed 교체 후 재시도 (프롬프트 유지)")
+                        self._stats._update_last_remedy("seed_retry", "프롬프트 유지, seed만 교체")
                         continue
                     # 3회 연속 no_motion → 동작 자체가 WAN에 너무 어려운 것
                     # 액션 전환
@@ -1384,6 +1719,9 @@ class WanBackend:
                             f"  [액션전환] 새 액션: {new_analysis.action_desc} "
                             f"| moving={new_analysis.moving_parts} "
                             f"| frames={new_analysis.frame_count}"
+                        )
+                        self._stats._update_last_remedy(
+                            "action_switch", f"→ {new_analysis.action_desc[:30]}"
                         )
                     except Exception as e:
                         logger.warning(f"  ⚠ 액션 전환 실패: {e}")
@@ -1433,6 +1771,9 @@ class WanBackend:
                                 f"| moving={new_analysis.moving_parts} "
                                 f"| frames={new_analysis.frame_count}"
                             )
+                            self._stats._update_last_remedy(
+                                "action_switch", f"→ {new_analysis.action_desc[:30]}"
+                            )
                             if mask_path_local:
                                 try:
                                     import tempfile as _tempfile
@@ -1450,21 +1791,36 @@ class WanBackend:
                     consecutive_quality_fails = 0
 
                 # AI가 결정한 수치 적용
+                adjust_details2 = []
                 if ai_result.frame_rate is not None:
                     logger.info(f"  [AI조정] fps: {current_fps} → {ai_result.frame_rate}")
+                    adjust_details2.append(f"fps:{current_fps}→{ai_result.frame_rate}")
                     current_fps = ai_result.frame_rate
                 if ai_result.scale is not None:
                     logger.info(f"  [AI조정] scale: {current_scale} → {ai_result.scale}")
+                    adjust_details2.append(f"scale:{current_scale}→{ai_result.scale}")
                     current_scale = ai_result.scale
                 if ai_result.positive:
                     logger.info(f"  [AI조정] positive 교체: {ai_result.positive}")
+                    adjust_details2.append(f"pos:{ai_result.positive[:20]}")
                     adj_positive = ai_result.positive  # 누적 없이 교체
                 if ai_result.negative:
                     logger.info(f"  [AI조정] negative 교체: {ai_result.negative}")
+                    adjust_details2.append(f"neg:{ai_result.negative[:20]}")
                     adj_negative = ai_result.negative  # 누적 없이 교체
+                if adjust_details2:
+                    self._stats._update_last_remedy("ai_adjust", ", ".join(adjust_details2))
                 current_positive, current_negative = build_prompts()
 
-        # ── 루프 종료: 성공 결과 우선 반환 ──────────────────────
+        # ── 루프 종료: 통계 출력 + VRAM 초기화 ─────────────────
+        # 현재 이미지 실패 비율 + 누적 실패 비율 출력
+        self._stats.print_image_summary(stem)
+        self._stats.print_cumulative_summary()
+        self._stats.save_to_file()
+
+        # VRAM 초기화: 다음 이미지 생성 전 누적 메모리 해제
+        self.comfyui.free_memory()
+
         if successful_results:
             logger.info(
                 f"\n  ✅ {MAX_RETRIES}회 완료. 성공 {len(successful_results)}개 중 첫 번째 반환."
