@@ -320,6 +320,7 @@ class _ValidationStats:
         self._total_metric_fails: int = 0
         self._total_ai_fails: int = 0
         self._total_success: int = 0
+        self._total_ai_issue_attempts: int = 0  # AI이슈가 발생한 시도 수
         self._total_metric_items: Counter = Counter()
         self._total_ai_items: Counter = Counter()
         self._total_remedies: Counter = Counter()
@@ -474,9 +475,11 @@ class _ValidationStats:
             self._total_metric_items.update(issues)
             if ai_issues:
                 self._total_ai_items.update(ai_issues)
+                self._total_ai_issue_attempts += 1
         elif result_type == "ai_fail":
             self._total_ai_fails += 1
             self._total_ai_items.update(issues)
+            self._total_ai_issue_attempts += 1
         elif result_type == "success":
             self._total_success += 1
 
@@ -539,6 +542,9 @@ class _ValidationStats:
     def _update_last_ai_issues(self, ai_issues: list[str]) -> None:
         """마지막 기록(수치 실패)에 AI 검증 이슈를 추가 (파일 저장은 flush 시)."""
         if self._current_records and ai_issues:
+            # 이전에 ai_issues가 없었으면 카운터 증가
+            if not self._current_records[-1].get("ai_issues"):
+                self._total_ai_issue_attempts += 1
             self._current_records[-1]["ai_issues"] = ai_issues
             self._total_ai_items.update(ai_issues)
 
@@ -584,7 +590,7 @@ class _ValidationStats:
         for item, cnt in metric_items.most_common():
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
 
-        lines.append(f"    AI실패: {ai_fails} ({pct(ai_fails)})")
+        lines.append(f"    AI검증 단독 실패: {ai_fails} ({pct(ai_fails)})")
         lines.append(f"    AI이슈 발생: {ai_issue_attempts}회 ({pct(ai_issue_attempts)})")
         for item, cnt in ai_items.most_common():
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
@@ -617,7 +623,11 @@ class _ValidationStats:
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
 
         lines.append(
-            f"    AI실패: {self._total_ai_fails} ({pct(self._total_ai_fails)})"
+            f"    AI검증 단독 실패: {self._total_ai_fails} ({pct(self._total_ai_fails)})"
+        )
+        lines.append(
+            f"    AI이슈 발생: {self._total_ai_issue_attempts}회 "
+            f"({pct(self._total_ai_issue_attempts)})"
         )
         for item, cnt in self._total_ai_items.most_common():
             lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
