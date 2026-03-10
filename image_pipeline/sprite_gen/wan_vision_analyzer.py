@@ -241,12 +241,18 @@ STEP 8 — LOOP TYPE & BACKGROUND
      Ask yourself: "If this image were a real moment frozen in time,
      would the subject RETURN to the starting state, or CONTINUE forward?"
 
+     Then ask: "Is the subject moving in ONE DIRECTION through space?"
+     If the subject, or anything in the scene, is traveling in a single
+     direction (forward, away, upward, etc.), pingpong MUST be false.
+     The direction of travel does not reverse in reality.
+
      pingpong = false (continue forward):
        The image implies ongoing movement through space or time.
        If you played it backward, it would look unnatural.
 
      pingpong = true (return to start):
        The image implies a stationary subject doing a repeating motion.
+       Nothing in the scene is traveling in any direction.
        Playing it forward then backward would look natural.
 
   B) BACKGROUND TYPE:
