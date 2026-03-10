@@ -66,7 +66,7 @@
 | steps | 20 | 원래 30 → 33% 시간 단축 |
 | pingpong | True | 순방향→역방향 루프로 이음새 완화 |
 | frames | AI 동적 결정 | 17~81 범위, 권장 17~49 |
-| MAX_RETRIES | **7** | 이미지당 최대 생성 시도 횟수 |
+| MAX_RETRIES | **10** | 이미지당 최대 생성 시도 횟수 |
 | WAN 모델 | wan2.1-i2v-14b-480p-Q3_K_S.gguf | |
 | Gemini 모델 | gemini-2.5-flash | 분석 + 검증 모두 사용 |
 
@@ -89,15 +89,18 @@ generate(image_path)
   │    (SetLatentNoiseMask는 WAN video latent 5D 비호환 → 픽셀 레벨 후처리로 대체)
   │
   └─ Step 3: for attempt in range(1, MAX_RETRIES + 1):
+       ├─ VRAM 측정 (nvidia-smi)
        ├─ _generate_one() → ComfyUI 생성 → mp4 다운로드
+       ├─ WanBgRemover() → 투명 PNG + APNG + WebM (매 시도마다 실행)
        ├─ WanValidator.validate() — 수치 검증 8항목
        ├─ (수치 통과 시) WanAIValidator.validate() — Gemini Vision 영상 검증
-       ├─ (AI 통과 시) _apply_post_compositing() → WanBgRemover() → APNG
+       ├─ (AI 통과 시) _apply_post_compositing()
        │   successful_results.append(result); continue  ← return 대신
        └─ (AI 실패 시) AI 조정값 적용 후 다음 시도
             연속 품질 실패 3회 → analyze_with_exclusion()으로 액션 전환
 
-  루프 종료 후: successful_results[0] 반환 또는 WanResult(success=False)
+  루프 종료 후: 통계 터미널 출력 → 파일 저장 → VRAM 초기화
+               → successful_results[0] 반환 또는 WanResult(success=False)
 ```
 
 ### BG 프롬프트 (전부 중국어 — 항상 강제 추가)
@@ -894,12 +897,12 @@ Git 레포: https://github.com/solidSnakesado/Create_image_motion/tree/dev
 
 | 파일 | 줄수 | 역할 |
 |---|---|---|
-| `wan_backend.py` | 2111 | 메인 오케스트레이터. 전체 흐름 제어 + VRAM 초기화 + 검증 통계 |
+| `wan_backend.py` | 2173 | 메인 오케스트레이터. 전체 흐름 제어 + VRAM 초기화/모니터링 + 검증 통계 + 로그 파서 |
 | `wan_ai_validator.py` | 541 | Gemini Vision으로 영상 품질 검증 |
 | `wan_vision_analyzer.py` | 436 | Gemini Vision으로 이미지 분석 + 프롬프트/수치 결정 |
 | `wan_validator.py` | 708 | 수치 기반 8항목 검증 |
 | `wan_mask_generator.py` | 104 | moving_zone → 흑백 마스크 PNG |
-| `wan_bg_remover.py` | 209 | flood fill 배경 제거 → APNG |
+| `wan_bg_remover.py` | 254 | flood fill 배경 제거 → APNG + WebM |
 
 ---
 
@@ -1141,28 +1144,12 @@ free_memory()              → VRAM 초기화
 **파일 기록 예시 (validation_stats.txt):**
 ```
 [2026-03-10 12:34:56] IMAGE: frog_01
-  attempt 1: metric_fail  | too_slow, ghosting               [AI: unnatural_movement, character_inconsistency]
-  attempt 2: metric_fail  | ghosting                         [AI: unnatural_movement, speed_too_slow]
-  attempt 3: metric_fail  | too_slow, ghosting               [AI: unnatural_movement, character_inconsistency]
-  attempt 4: metric_fail  | no_motion, too_slow
-  attempt 5: metric_fail  | no_motion, too_slow
+  attempt 1: metric_fail  | too_slow, ghosting               [AI: unnatural_movement, character_inconsistency] → ai_adjust (pos:身体平滑运动) [VRAM:8133MB]
+  attempt 2: metric_fail  | ghosting                         [AI: unnatural_movement, speed_too_slow] → ai_adjust (fps:14→16) [VRAM:8145MB]
+  attempt 3: metric_fail  | too_slow, ghosting               [AI: unnatural_movement, character_inconsistency] → action_switch (→ 头部点头) [VRAM:8160MB]
+  attempt 4: metric_fail  | no_motion, too_slow              → seed_retry (프롬프트 유지, seed만 교체) [VRAM:8155MB]
+  attempt 5: metric_fail  | no_motion, too_slow              → seed_retry (프롬프트 유지, seed만 교체) [VRAM:8158MB]
   ---
-  이미지 결과: 총 5회
-    수치실패: 5 (100.0%)
-      - too_slow: 4 (80.0%)
-      - ghosting: 3 (60.0%)
-      - no_motion: 2 (40.0%)
-    AI실패: 0 (0.0%)
-    AI이슈 발생: 3회 (60.0%)
-      - unnatural_movement: 3 (60.0%)
-      - character_inconsistency: 2 (40.0%)
-      - speed_too_slow: 1 (20.0%)
-    성공: 0 (0.0%)
-    보완 조치: (총 5회)
-      - ai_adjust: 2 (40.0%)
-      - seed_retry: 2 (40.0%)
-      - action_switch: 1 (20.0%)
-  [누적] 이미지 1장 | 총 5회 | 수치 5 (100.0%) | AI 0 (0.0%) | 성공 0 (0.0%)
 ```
 
 ---
@@ -1178,10 +1165,15 @@ free_memory()              → VRAM 초기화
 - ✅ 검증 실패 통계 + 보완 조치 추적 기능
 - ✅ 수치 실패 시 AI 이슈도 함께 기록 (`ai_issues` 필드 추가)
 - ✅ 매 시도마다 파일 저장 + 성공 시에도 기록 (flush 방식 — remedy/ai_issues 확정 후 저장)
+- ✅ `MAX_RETRIES = 10` 변경 완료
+- ✅ VRAM 모니터링 — 매 시도마다 `nvidia-smi` 측정, 터미널 + 파일 기록
+- ✅ 요약 통계 터미널 전용 — 파일에는 개별 시도 + 구분선만 기록
+- ✅ `load_history()` 파서 — 기존(구 포맷) + 신규(신 포맷) 모두 파싱 가능
+- ✅ WebM(VP9+alpha) 출력 추가 (`wan_bg_remover.py`)
+- ✅ 매 시도마다 배경 제거 실행 (검증 통과/실패 무관, CPU 처리 ~5초)
 
 ### 남은 항목
-- ✅ ~~`wan_backend.py` `MAX_RETRIES = 5` → `7` 변경 완료~~
-- 🟡 `--lowvram` 모드 vs VRAM 초기화 비교 테스트 (어느 쪽이 안정적인지)
+- 🟡 `--cache-none` 옵션 테스트 (VRAM 누수 추가 방지)
 - 🟡 **실패 이력 참조 기능** (아래 상세)
 - 🟢 characters2/ + vehicles/ 40개 이미지 일괄 실행
 - 🟢 cartoon_animals/ 10개 이미지 일괄 실행
@@ -1214,7 +1206,7 @@ generate("frog_01.png") 시작
 | 성공했던 프롬프트 | 성공 기록이 있으면 그 프롬프트를 재활용 |
 
 **필요한 변경:**
-1. `validation_stats.txt` → JSON 형식 전환 (파싱 용이)
+1. ~~`validation_stats.txt` → JSON 형식 전환~~ → `load_history()` 파서로 기존 txt 직접 파싱 (구현 완료)
 2. 성공 시 positive/negative 프롬프트도 파일에 저장
 3. `generate()` 시작 시 이전 기록 로드 → Vision Analyzer 프롬프트에 주입
 
