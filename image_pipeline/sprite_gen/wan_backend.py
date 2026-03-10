@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # 설정
 # ─────────────────────────────────────────────────────────────
 
-MAX_RETRIES = 10
+MAX_RETRIES = 7
 
 COMFYUI_URL   = os.environ.get("COMFYUI_URL",   "http://127.0.0.1:8188")
 WAN_MODEL     = os.environ.get("WAN_MODEL",     "wan2.1-i2v-14b-480p-Q3_K_S.gguf")
@@ -1598,7 +1598,7 @@ class WanBackend:
         # 동일 AI 이슈 연속 발생 카운터
         # unnatural_movement 또는 character_inconsistency가 N회 연속이면
         # 프롬프트 수정이 아닌 액션 전환을 AI에 요청
-        CONSECUTIVE_FAIL_THRESHOLD = 3
+        CONSECUTIVE_FAIL_THRESHOLD = 2
         consecutive_quality_fails  = 0   # unnatural/character 연속 카운트
         consecutive_nomotion_fails = 0   # no_motion/too_slow 연속 카운트
         QUALITY_ISSUES = {"unnatural_movement", "character_inconsistency"}
@@ -1635,23 +1635,6 @@ class WanBackend:
 
             # ── Step 4: 검증 (WAN 원본 영상 기준) ───────────────
             validation = self.validator.validate(video_path, analysis=analysis)
-
-            # ── Step 4.1: 배경 제거 (매 시도마다 실행) ────────────
-            # CPU 처리만 사용 (~5초), 검증 결과와 무관하게 모든 생성물에 적용
-            try:
-                transparent_dir = os.path.join(
-                    out_dir, f"{stem}_transparent"
-                )
-                self.bg_remover.remove_background(
-                    video_path  = video_path,
-                    output_dir  = transparent_dir,
-                    output_apng = True,
-                    output_webm = True,
-                    fps         = current_fps,
-                )
-                logger.info(f"  → 배경 제거 완료: {transparent_dir}")
-            except Exception as e:
-                logger.warning(f"  ⚠ 배경 제거 실패 (무시): {e}")
 
             if validation.passed:
                 logger.info(f"  ✅ 수치 검증 통과 → AI 검증 시작")
@@ -1699,6 +1682,22 @@ class WanBackend:
                             logger.info("  [Compositing] 후처리 합성 완료")
                         except Exception as e:
                             logger.warning(f"  ⚠ 후처리 합성 실패 (원본 영상 유지): {e}")
+
+                    # ── 배경 제거 후처리 (성공 시에만) ─────────────
+                    try:
+                        transparent_dir = os.path.join(
+                            out_dir, f"{stem}_transparent"
+                        )
+                        self.bg_remover.remove_background(
+                            video_path  = video_path,
+                            output_dir  = transparent_dir,
+                            output_apng = True,
+                            output_webm = True,
+                            fps         = current_fps,
+                        )
+                        logger.info(f"  → 배경 제거 완료: {transparent_dir}")
+                    except Exception as e:
+                        logger.warning(f"  ⚠ 배경 제거 실패 (무시): {e}")
 
                     # 성공 결과 저장 후 루프 계속 (MAX_RETRIES 전부 소진)
                     result = WanResult(
