@@ -344,8 +344,13 @@ class _ValidationStats:
             remedy_detail: 보완 조치 상세 내용 (예: "fps:14→16, negative:身体晃动")
         """
         if self._current_image != image_name:
+            # 새 이미지 시작 → 이전 이미지의 마지막 시도 flush
+            self._flush_pending_attempt()
             self._current_image = image_name
             self._current_records = []
+
+        # 이전 시도가 있으면 확정 저장 (remedy/ai_issues 모두 반영된 상태)
+        self._flush_pending_attempt()
 
         self._current_records.append({
             "type": result_type,
@@ -360,7 +365,6 @@ class _ValidationStats:
         if result_type == "metric_fail":
             self._total_metric_fails += 1
             self._total_metric_items.update(issues)
-            # 수치 실패 시 함께 발생한 AI 이슈도 누적
             if ai_issues:
                 self._total_ai_items.update(ai_issues)
         elif result_type == "ai_fail":
@@ -372,13 +376,20 @@ class _ValidationStats:
         if remedy:
             self._total_remedies[remedy] += 1
 
-        # 매 시도마다 즉시 파일에 기록 (중간 중단 시에도 기록 보존)
-        self._append_attempt_to_file()
+        # 현재 시도는 pending 상태 (remedy/ai_issues가 나중에 업데이트될 수 있음)
+        self._pending_flush = True
 
-    def _append_attempt_to_file(self) -> None:
-        """마지막 시도 결과를 즉시 파일에 기록."""
+    def _flush_pending_attempt(self) -> None:
+        """
+        대기 중인 마지막 시도를 파일에 기록.
+        remedy/ai_issues가 모두 확정된 후에 호출됨.
+        """
+        if not getattr(self, '_pending_flush', False):
+            return
         if not self._current_records:
             return
+
+        self._pending_flush = False
         r = self._current_records[-1]
         attempt_num = len(self._current_records)
 
@@ -406,17 +417,17 @@ class _ValidationStats:
             with open(self._file_path, "a", encoding="utf-8") as f:
                 f.write(header + line)
         except Exception:
-            pass  # 즉시 저장 실패해도 최종 save_to_file()에서 재기록
+            pass
 
     def _update_last_remedy(self, remedy: str, detail: str = "") -> None:
-        """마지막 기록의 보완 조치를 업데이트."""
+        """마지막 기록의 보완 조치를 업데이트 (파일 저장은 flush 시)."""
         if self._current_records:
             self._current_records[-1]["remedy"] = remedy
             self._current_records[-1]["remedy_detail"] = detail
             self._total_remedies[remedy] += 1
 
     def _update_last_ai_issues(self, ai_issues: list[str]) -> None:
-        """마지막 기록(수치 실패)에 AI 검증 이슈를 추가."""
+        """마지막 기록(수치 실패)에 AI 검증 이슈를 추가 (파일 저장은 flush 시)."""
         if self._current_records and ai_issues:
             self._current_records[-1]["ai_issues"] = ai_issues
             self._total_ai_items.update(ai_issues)
@@ -515,8 +526,11 @@ class _ValidationStats:
 
     def save_to_file(self) -> None:
         """현재 이미지의 요약 통계를 validation_stats.txt에 추가 기록.
-        개별 시도는 _append_attempt_to_file()에서 이미 즉시 기록됨.
+        개별 시도는 _flush_pending_attempt()에서 확정 후 기록됨.
         """
+        # 마지막 시도 flush (루프 종료 시 pending 상태일 수 있음)
+        self._flush_pending_attempt()
+
         records = self._current_records
         if not records:
             return
