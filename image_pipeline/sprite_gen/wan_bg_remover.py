@@ -60,6 +60,7 @@ class WanBgRemover:
         video_path:  str,
         output_dir:  str,
         output_apng: bool = True,
+        output_webm: bool = True,
         fps:         int  = 16,
     ) -> str:
         """
@@ -69,7 +70,8 @@ class WanBgRemover:
             video_path  : 입력 MP4 경로
             output_dir  : PNG 저장 디렉토리
             output_apng : APNG 파일도 생성 여부
-            fps         : APNG fps
+            output_webm : WebM(VP9 alpha) 파일도 생성 여부
+            fps         : APNG/WebM fps
 
         Returns:
             output_dir 경로
@@ -108,6 +110,11 @@ class WanBgRemover:
             apng_path = os.path.join(output_dir, f"{stem}_transparent.apng")
             self._save_apng(transparent_frames, apng_path, fps)
             logger.info(f"[BgRemover] APNG 저장: {apng_path}")
+
+        # 5. WebM 생성 (VP9 + alpha — 웹 배포용 투명 영상)
+        if output_webm:
+            webm_path = os.path.join(output_dir, f"{stem}_transparent.webm")
+            self._save_webm(output_dir, stem, webm_path, fps)
 
         return output_dir
 
@@ -208,3 +215,41 @@ class WanBgRemover:
             )
         except Exception as e:
             logger.warning(f"[BgRemover] APNG 저장 실패: {e}")
+
+    def _save_webm(
+        self,
+        png_dir:  str,
+        stem:     str,
+        out_path: str,
+        fps:      int,
+    ) -> None:
+        """투명 PNG 시퀀스 → WebM (VP9 + alpha) 변환.
+
+        VP9는 알파 채널을 지원하는 웹 표준 영상 코덱.
+        Chrome, Firefox, Edge에서 투명 영상 재생 가능.
+        """
+        try:
+            pattern = os.path.join(png_dir, f"{stem}_frame_%04d.png")
+            cmd = [
+                "ffmpeg",
+                "-framerate", str(fps),
+                "-i", pattern,
+                "-c:v", "libvpx-vp9",
+                "-pix_fmt", "yuva420p",
+                "-b:v", "0",
+                "-crf", "30",
+                "-auto-alt-ref", "0",
+                "-y", "-loglevel", "quiet",
+                out_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            if result.returncode == 0:
+                size_mb = os.path.getsize(out_path) / (1024 * 1024)
+                logger.info(f"[BgRemover] WebM 저장: {out_path} ({size_mb:.1f}MB)")
+            else:
+                logger.warning(
+                    f"[BgRemover] WebM 변환 실패 (ffmpeg): "
+                    f"{result.stderr.decode()[:200]}"
+                )
+        except Exception as e:
+            logger.warning(f"[BgRemover] WebM 저장 실패: {e}")

@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -59,7 +60,7 @@ logger = logging.getLogger(__name__)
 # 설정
 # ─────────────────────────────────────────────────────────────
 
-MAX_RETRIES = 7
+MAX_RETRIES = 10
 
 COMFYUI_URL   = os.environ.get("COMFYUI_URL",   "http://127.0.0.1:8188")
 WAN_MODEL     = os.environ.get("WAN_MODEL",     "wan2.1-i2v-14b-480p-Q3_K_S.gguf")
@@ -284,28 +285,30 @@ class _ValidationStats:
     """
     검증 실패 항목 + 보완 조치를 이미지별·누적으로 추적하고 파일에 기록.
 
-    기록 형식 (validation_stats.txt):
-        [2026-03-10 12:34:56] IMAGE: frog_processed
-          attempt 1: metric_fail | no_motion, too_slow       → seed_retry
-          attempt 2: metric_fail | ghosting                  → ai_adjust (fps:14→16, negative:...)
-          attempt 3: ai_fail    | unnatural_movement         → ai_adjust (negative:...)
-          attempt 4: ai_fail    | character_inconsistency    → action_switch (귀 flap)
-          attempt 5: success    |
+    파일 기록 형식 (validation_stats.txt):
+        [2026-03-10 12:34:56] IMAGE: frog_01
+          attempt 1: metric_fail | ghosting  [AI: unnatural_movement] → ai_adjust (...) [VRAM:8133MB]
+          attempt 2: metric_fail | too_slow  → seed_retry (...) [VRAM:8145MB]
+          attempt 3: success     |           [VRAM:8150MB]
           ---
-          이미지 결과: 총 5회
-            수치실패: 2 (40.0%)
-              - no_motion: 1 (20.0%)
-              - too_slow: 1 (20.0%)
-              - ghosting: 1 (20.0%)
-            AI실패: 2 (40.0%)
-              - unnatural_movement: 1 (20.0%)
-              - character_inconsistency: 1 (20.0%)
-            성공: 1 (20.0%)
-          보완 조치:
-            - seed_retry: 1 (25.0%)
-            - ai_adjust: 2 (50.0%)
-            - action_switch: 1 (25.0%)
+
+    터미널 출력 (이미지별 + 누적 통계):
+        ──── [통계] frog_01 — 총 3회 시도 ────
+          수치실패: 2 (66.7%)  ...
+        ════ [누적 통계] 이미지 2장 | 총 10회 ════
+          ...
+
+    load_history(): 기존 파일 파싱 (구 포맷·신 포맷 모두 호환)
     """
+
+    # attempt 라인 파싱용 정규식
+    _ATTEMPT_RE = re.compile(
+        r"attempt\s+(\d+):\s*(\S+)\s*\|\s*([^[\]→]*?)"
+        r"(?:\[AI:\s*([^\]]*)\])?"
+        r"(?:\s*→\s*(\S+)\s*(?:\(([^)]*)\))?)?"
+        r"(?:\s*\[VRAM:(\d+)MB\])?"
+        r"\s*$"
+    )
 
     def __init__(self, output_dir: str) -> None:
         self._file_path = os.path.join(output_dir, "validation_stats.txt")
@@ -322,6 +325,109 @@ class _ValidationStats:
         self._total_remedies: Counter = Counter()
         self._total_images: int = 0
 
+    def load_history(self, image_name: str | None = None) -> dict:
+        """
+        기존 validation_stats.txt를 파싱하여 이력 반환.
+        구 포맷(요약 통계 포함)과 신 포맷(attempt + 구분선만) 모두 호환.
+
+        Args:
+            image_name: 특정 이미지만 조회 (None이면 전체)
+
+        Returns:
+            {
+                "images": {
+                    "frog_01": {
+                        "attempts": [
+                            {
+                                "type": "metric_fail",
+                                "issues": ["ghosting"],
+                                "ai_issues": ["unnatural_movement"],
+                                "remedy": "ai_adjust",
+                                "remedy_detail": "fps:14→16, ...",
+                                "vram_mb": 8133,
+                            }, ...
+                        ],
+                    }, ...
+                },
+                "total_attempts": 28,
+                "total_images": 4,
+            }
+        """
+        result: dict = {"images": {}, "total_attempts": 0, "total_images": 0}
+
+        if not os.path.exists(self._file_path):
+            return result
+
+        try:
+            with open(self._file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception:
+            return result
+
+        current_img = None
+        current_attempts: list[dict] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # 이미지 헤더: [2026-03-10 12:19:56] IMAGE: frog_01
+            if stripped.startswith("[") and "IMAGE:" in stripped:
+                # 이전 이미지 저장
+                if current_img and current_attempts:
+                    result["images"][current_img] = {
+                        "attempts": current_attempts,
+                    }
+                current_img = stripped.split("IMAGE:")[-1].strip()
+                current_attempts = []
+                continue
+
+            # attempt 라인 파싱
+            m = self._ATTEMPT_RE.search(stripped)
+            if m:
+                issues_raw = m.group(3).strip().rstrip(",")
+                issues = [x.strip() for x in issues_raw.split(",") if x.strip()]
+                ai_raw = m.group(4)
+                ai_issues = (
+                    [x.strip() for x in ai_raw.split(",") if x.strip()]
+                    if ai_raw else []
+                )
+                vram = int(m.group(7)) if m.group(7) else None
+
+                current_attempts.append({
+                    "type": m.group(2),
+                    "issues": issues,
+                    "ai_issues": ai_issues,
+                    "remedy": m.group(5) or None,
+                    "remedy_detail": m.group(6) or None,
+                    "vram_mb": vram,
+                })
+                continue
+
+            # 구 포맷의 요약 통계·구분선은 무시
+
+        # 마지막 이미지 저장
+        if current_img and current_attempts:
+            result["images"][current_img] = {
+                "attempts": current_attempts,
+            }
+
+        result["total_images"] = len(result["images"])
+        result["total_attempts"] = sum(
+            len(img["attempts"]) for img in result["images"].values()
+        )
+
+        # 특정 이미지만 필터링
+        if image_name and image_name in result["images"]:
+            return {
+                "images": {image_name: result["images"][image_name]},
+                "total_attempts": len(result["images"][image_name]["attempts"]),
+                "total_images": 1,
+            }
+
+        return result
+
     def record(
         self,
         image_name:  str,
@@ -330,6 +436,7 @@ class _ValidationStats:
         ai_issues:   list[str] | None = None,
         remedy:      str | None = None,
         remedy_detail: str | None = None,
+        vram_mb:     int | None = None,
     ) -> None:
         """
         한 번의 시도 결과를 기록.
@@ -342,14 +449,13 @@ class _ValidationStats:
             remedy:        보완 조치 종류
                            "seed_retry" | "ai_adjust" | "action_switch" | "soft_pass" | None
             remedy_detail: 보완 조치 상세 내용 (예: "fps:14→16, negative:身体晃动")
+            vram_mb:       시도 시작 시점 VRAM 사용량 (MB)
         """
         if self._current_image != image_name:
-            # 새 이미지 시작 → 이전 이미지의 마지막 시도 flush
             self._flush_pending_attempt()
             self._current_image = image_name
             self._current_records = []
 
-        # 이전 시도가 있으면 확정 저장 (remedy/ai_issues 모두 반영된 상태)
         self._flush_pending_attempt()
 
         self._current_records.append({
@@ -358,6 +464,7 @@ class _ValidationStats:
             "ai_issues": ai_issues or [],
             "remedy": remedy,
             "remedy_detail": remedy_detail,
+            "vram_mb": vram_mb,
         })
 
         # 누적 카운터 업데이트
@@ -410,8 +517,11 @@ class _ValidationStats:
             remedy_str = f" → {r['remedy']}"
             if r.get("remedy_detail"):
                 remedy_str += f" ({r['remedy_detail']})"
+        vram_str = ""
+        if r.get("vram_mb") is not None:
+            vram_str = f" [VRAM:{r['vram_mb']}MB]"
 
-        line = f"  attempt {attempt_num}: {r['type']:<12} | {issues_str:<40}{ai_str}{remedy_str}\n"
+        line = f"  attempt {attempt_num}: {r['type']:<12} | {issues_str:<40}{ai_str}{remedy_str}{vram_str}\n"
 
         try:
             with open(self._file_path, "a", encoding="utf-8") as f:
@@ -525,77 +635,21 @@ class _ValidationStats:
         logger.info("\n".join(lines))
 
     def save_to_file(self) -> None:
-        """현재 이미지의 요약 통계를 validation_stats.txt에 추가 기록.
-        개별 시도는 _flush_pending_attempt()에서 확정 후 기록됨.
+        """마지막 pending 시도를 flush하고 구분선 추가.
+        요약 통계는 터미널(print_image_summary/print_cumulative_summary)에만 출력.
         """
         # 마지막 시도 flush (루프 종료 시 pending 상태일 수 있음)
         self._flush_pending_attempt()
 
-        records = self._current_records
-        if not records:
+        if not self._current_records:
             return
 
-        total = len(records)
-        metric_fails = sum(1 for r in records if r["type"] == "metric_fail")
-        ai_fails = sum(1 for r in records if r["type"] == "ai_fail")
-        successes = sum(1 for r in records if r["type"] == "success")
-
-        pct = lambda n, d=total: f"{n/d*100:.1f}%" if d > 0 else "0%"
-
-        lines = ["  ---"]
-        lines.append(f"  이미지 결과: 총 {total}회")
-        lines.append(f"    수치실패: {metric_fails} ({pct(metric_fails)})")
-
-        metric_items: Counter = Counter()
-        ai_items: Counter = Counter()
-        remedy_counts: Counter = Counter()
-        for r in records:
-            if r["type"] == "metric_fail":
-                metric_items.update(r["issues"])
-                if r.get("ai_issues"):
-                    ai_items.update(r["ai_issues"])
-            elif r["type"] == "ai_fail":
-                ai_items.update(r["issues"])
-            if r.get("remedy"):
-                remedy_counts[r["remedy"]] += 1
-
-        for item, cnt in metric_items.most_common():
-            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
-
-        ai_issue_attempts = sum(
-            1 for r in records
-            if r["type"] == "ai_fail" or r.get("ai_issues")
-        )
-        lines.append(f"    AI실패: {ai_fails} ({pct(ai_fails)})")
-        lines.append(f"    AI이슈 발생: {ai_issue_attempts}회 ({pct(ai_issue_attempts)})")
-        for item, cnt in ai_items.most_common():
-            lines.append(f"      - {item}: {cnt} ({pct(cnt)})")
-
-        lines.append(f"    성공: {successes} ({pct(successes)})")
-
-        if remedy_counts:
-            remedy_total = sum(remedy_counts.values())
-            lines.append(f"    보완 조치: (총 {remedy_total}회)")
-            for rem, cnt in remedy_counts.most_common():
-                pct_r = f"{cnt/remedy_total*100:.1f}%" if remedy_total > 0 else "0%"
-                lines.append(f"      - {rem}: {cnt} ({pct_r})")
-
-        # 누적 통계
-        cum_total = self._total_attempts
-        cum_pct = lambda n: f"{n/cum_total*100:.1f}%" if cum_total > 0 else "0%"
-        lines.append(
-            f"  [누적] 이미지 {self._total_images}장 | 총 {cum_total}회 | "
-            f"수치 {self._total_metric_fails} ({cum_pct(self._total_metric_fails)}) | "
-            f"AI {self._total_ai_fails} ({cum_pct(self._total_ai_fails)}) | "
-            f"성공 {self._total_success} ({cum_pct(self._total_success)})"
-        )
-
+        # 파일에 구분선만 추가
         try:
             with open(self._file_path, "a", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
-            logger.info(f"  [통계] 파일 저장: {self._file_path}")
-        except Exception as e:
-            logger.warning(f"  [통계] 파일 저장 실패: {e}")
+                f.write("  ---\n")
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1551,9 +1605,14 @@ class WanBackend:
 
         for attempt in range(1, MAX_RETRIES + 1):
             seed = random.randint(0, 2**32 - 1)
+            # VRAM 사용량 측정 (생성 전)
+            vram_pre = self.comfyui._get_vram_usage()
+            vram_used = vram_pre['used'] if vram_pre else None
+            vram_str = f"VRAM={vram_pre['used']}MB/{vram_pre['total']}MB" if vram_pre else ""
             logger.info(
                 f"\n  [시도 {attempt}/{MAX_RETRIES}] "
                 f"seed={seed} fps={current_fps} scale={current_scale:.2f}"
+                f" {vram_str}"
             )
 
             try:
@@ -1576,6 +1635,23 @@ class WanBackend:
 
             # ── Step 4: 검증 (WAN 원본 영상 기준) ───────────────
             validation = self.validator.validate(video_path, analysis=analysis)
+
+            # ── Step 4.1: 배경 제거 (매 시도마다 실행) ────────────
+            # CPU 처리만 사용 (~5초), 검증 결과와 무관하게 모든 생성물에 적용
+            try:
+                transparent_dir = os.path.join(
+                    out_dir, f"{stem}_transparent"
+                )
+                self.bg_remover.remove_background(
+                    video_path  = video_path,
+                    output_dir  = transparent_dir,
+                    output_apng = True,
+                    output_webm = True,
+                    fps         = current_fps,
+                )
+                logger.info(f"  → 배경 제거 완료: {transparent_dir}")
+            except Exception as e:
+                logger.warning(f"  ⚠ 배경 제거 실패 (무시): {e}")
 
             if validation.passed:
                 logger.info(f"  ✅ 수치 검증 통과 → AI 검증 시작")
@@ -1602,14 +1678,15 @@ class WanBackend:
                         )
                         ai_result.passed = True
                         self._stats.record(stem, "success", [], remedy="soft_pass",
-                                           remedy_detail=f"soft_issues={ai_result.issues}")
+                                           remedy_detail=f"soft_issues={ai_result.issues}",
+                                           vram_mb=vram_used)
 
                 if ai_result.passed:
                     # soft_pass에서 이미 기록한 경우가 아니면 성공 기록
                     last_rec = (self._stats._current_records[-1]
                                 if self._stats._current_records else None)
                     if not (last_rec and last_rec.get("remedy") == "soft_pass"):
-                        self._stats.record(stem, "success", [])
+                        self._stats.record(stem, "success", [], vram_mb=vram_used)
                     logger.info(f"\n  ✅ AI 검증 통과! (시도 {attempt}회)")
                     logger.info(f"  → {video_path}")
 
@@ -1622,21 +1699,6 @@ class WanBackend:
                             logger.info("  [Compositing] 후처리 합성 완료")
                         except Exception as e:
                             logger.warning(f"  ⚠ 후처리 합성 실패 (원본 영상 유지): {e}")
-
-                    # ── 배경 제거 후처리 ─────────────────────
-                    try:
-                        transparent_dir = os.path.join(
-                            out_dir, f"{stem}_transparent"
-                        )
-                        self.bg_remover.remove_background(
-                            video_path  = video_path,
-                            output_dir  = transparent_dir,
-                            output_apng = True,
-                            fps         = current_fps,
-                        )
-                        logger.info(f"  → 배경 제거 완료: {transparent_dir}")
-                    except Exception as e:
-                        logger.warning(f"  ⚠ 배경 제거 실패 (무시): {e}")
 
                     # 성공 결과 저장 후 루프 계속 (MAX_RETRIES 전부 소진)
                     result = WanResult(
@@ -1656,7 +1718,7 @@ class WanBackend:
                     continue
                 else:
                     # AI 검증 실패 기록
-                    self._stats.record(stem, "ai_fail", ai_result.issues or [])
+                    self._stats.record(stem, "ai_fail", ai_result.issues or [], vram_mb=vram_used)
                     logger.info(f"  ❌ AI 검증 실패: {ai_result.issues}")
                     logger.info(f"  [보존] 실패 영상: {video_path}")
 
@@ -1739,7 +1801,7 @@ class WanBackend:
                     current_positive, current_negative = build_prompts()
             else:
                 # 수치 검증 실패 기록
-                self._stats.record(stem, "metric_fail", validation.failed_checks)
+                self._stats.record(stem, "metric_fail", validation.failed_checks, vram_mb=vram_used)
                 logger.info(
                     f"  ❌ 수치 검증 실패: {validation.failed_checks}"
                 )
