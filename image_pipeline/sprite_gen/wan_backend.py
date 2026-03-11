@@ -250,14 +250,28 @@ def preprocess_image_simple(
     """
     프리셋 없이 고정 수치로 이미지 전처리.
     LLM이 프리셋을 사용하지 않는 새 파이프라인용.
+
+    원본이 캔버스(480×480) 이내이면 축소 없이 원본 크기 유지.
+    원본이 캔버스를 초과하면 scale 비율로 축소.
     """
     src = Image.open(image_path).convert("RGBA")
     ow, oh = src.size
 
-    target_w = int(width * scale)
-    ratio    = target_w / ow
-    target_h = int(oh * ratio)
-    src_resized = src.resize((target_w, target_h), Image.LANCZOS)
+    if ow <= width and oh <= height:
+        # 원본이 캔버스 이내 → 축소 없이 원본 크기 유지
+        target_w, target_h = ow, oh
+        src_resized = src
+    else:
+        # 원본이 캔버스 초과 → scale 적용하여 축소
+        target_w = int(width * scale)
+        ratio    = target_w / ow
+        target_h = int(oh * ratio)
+        # 축소 후에도 캔버스를 초과하면 캔버스에 맞춤
+        if target_h > height:
+            target_h = int(height * scale)
+            ratio    = target_h / oh
+            target_w = int(ow * ratio)
+        src_resized = src.resize((target_w, target_h), Image.LANCZOS)
 
     canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
 
@@ -270,8 +284,9 @@ def preprocess_image_simple(
     result = _white_anchor(canvas.convert("RGB"))
     result.save(output_path)
 
+    scaled_str = "원본유지" if (target_w == ow and target_h == oh) else "축소"
     logger.info(
-        f"[Preprocess] simple {ow}×{oh} → {target_w}×{target_h} "
+        f"[Preprocess] simple {ow}×{oh} → {target_w}×{target_h} ({scaled_str}) "
         f"배치=({x},{y}) 캔버스={width}×{height}"
     )
     return output_path
@@ -921,14 +936,18 @@ class ComfyUIClient:
 
     def free_memory(self) -> None:
         """
-        ComfyUI VRAM 초기화.
-        모든 모델을 언로드하고 CUDA 캐시를 비움.
-        12GB VRAM 환경에서 연속 생성 시 VRAM 누수 누적으로
-        행(hang)이 발생하는 문제를 방지.
+        ComfyUI VRAM + 시스템 RAM 초기화.
+        1. ComfyUI /free API → 모델 언로드 + CUDA 캐시 해제
+        2. Python gc.collect() → Python 레벨 메모리 해제
+        3. torch.cuda.empty_cache() → CUDA 메모리 풀 정리
+
+        12GB VRAM + 32GB RAM 환경에서 WAN GGUF 연속 생성 시
+        VRAM은 안정적이지만 RAM이 누적되는 문제(ComfyUI #11775)를 완화.
         """
         try:
-            # 초기화 전 VRAM 사용량 조회
+            # ── 1. ComfyUI /free API 호출 ──────────────────────
             vram_before = self._get_vram_usage()
+            ram_before = self._get_ram_usage()
 
             data = json.dumps({
                 "unload_models": True,
@@ -942,22 +961,75 @@ class ComfyUIClient:
             )
             urllib.request.urlopen(req, timeout=10)
 
-            # 초기화 후 VRAM 사용량 조회 (약간 대기 후)
-            time.sleep(1)
-            vram_after = self._get_vram_usage()
+            # ── 2. Python GC + torch 캐시 정리 ────────────────
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+            except ImportError:
+                pass
 
+            time.sleep(1)
+
+            # ── 3. 결과 로그 ──────────────────────────────────
+            vram_after = self._get_vram_usage()
+            ram_after = self._get_ram_usage()
+
+            parts = []
             if vram_before and vram_after:
-                freed = vram_before["used"] - vram_after["used"]
-                logger.info(
-                    f"[ComfyUI] VRAM 초기화 완료 — "
-                    f"전: {vram_before['used']}MB / {vram_before['total']}MB → "
-                    f"후: {vram_after['used']}MB / {vram_after['total']}MB "
-                    f"(해제: {freed}MB)"
+                vram_freed = vram_before["used"] - vram_after["used"]
+                parts.append(
+                    f"VRAM: {vram_before['used']}→{vram_after['used']}MB "
+                    f"(해제:{vram_freed}MB)"
                 )
+            if ram_before and ram_after:
+                ram_freed = ram_before["used_gb"] - ram_after["used_gb"]
+                parts.append(
+                    f"RAM: {ram_before['used_gb']:.1f}→{ram_after['used_gb']:.1f}GB "
+                    f"(해제:{ram_freed:.1f}GB) [{ram_after['percent']}%]"
+                )
+                # RAM 사용률 경고
+                if ram_after["percent"] > 85:
+                    logger.warning(
+                        f"  ⚠ RAM 사용률 {ram_after['percent']}% — "
+                        f"ComfyUI 재시작 권장 (pkill -f ComfyUI/main.py)"
+                    )
+
+            if parts:
+                logger.info(f"[ComfyUI] 메모리 초기화 완료 — {' | '.join(parts)}")
             else:
-                logger.info("[ComfyUI] VRAM 초기화 완료 (모델 언로드 + 캐시 클리어)")
+                logger.info("[ComfyUI] 메모리 초기화 완료")
+
         except Exception as e:
-            logger.warning(f"[ComfyUI] VRAM 초기화 실패 (생성에는 영향 없음): {e}")
+            logger.warning(f"[ComfyUI] 메모리 초기화 실패 (생성에는 영향 없음): {e}")
+
+    def _get_ram_usage(self) -> dict | None:
+        """시스템 RAM 사용량 조회."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["free", "-b"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                lines = result.stdout.strip().split("\n")
+                # "Mem:" 라인 파싱
+                for line in lines:
+                    if line.startswith("Mem:"):
+                        parts = line.split()
+                        total = int(parts[1])
+                        used = int(parts[2])
+                        return {
+                            "total_gb": total / (1024**3),
+                            "used_gb": used / (1024**3),
+                            "percent": int(used / total * 100),
+                        }
+        except Exception:
+            pass
+        return None
 
     def _get_vram_usage(self) -> dict | None:
         """nvidia-smi로 현재 VRAM 사용량 조회."""
