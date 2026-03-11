@@ -1,37 +1,48 @@
 # WAN I2V 파이프라인 개발 히스토리
 > 1주차: 2026-03-06 ~ 2026-03-08 | 2주차: 2026-03-09 ~ 2026-03-10
 > 목적: 검증 개발 과정 + 프롬프트 개선 과정 + 기능 수정 기록 + 환경 구성 기록
-> 
-wan_backend.py (메인 오케스트레이터)
+
+---
+
+## 스크립트 구성
+
+**wan_backend.py** (메인 오케스트레이터)
 전체 흐름을 제어합니다.
 > 이미지 전처리(480 캔버스 배치),
 > ComfyUI API 통신(업로드/큐/다운로드), 생성 루프(MAX_RETRIES=7),
 > 실패 시 보완 조치(AI 조정/seed 교체/액션 전환),
 > 성공 시 후처리 합성 + 배경 제거, VRAM/RAM 초기화, 검증 통계 기록까지 모든 것을 조율.
-wan_vision_analyzer.py (이미지 분석)
+
+**wan_vision_analyzer.py** (이미지 분석)
 생성 전에 Gemini Vision으로 원본 이미지를 분석.
 > "이 이미지에서 어떤 부위를 어떻게 움직일 것인가"를 결정.
 > 액션, 프롬프트(중국어), fps, 프레임 수,
-> moving zone, pingpong, bg_type, bg_remove를 모두 AI가 판단하여 반환합니다.
-wan_validator.py (수치 검증)
+> moving zone, pingpong, bg_type, bg_remove를 모두 AI가 판단하여 반환.
+
+**wan_validator.py** (수치 검증)
 생성된 영상을 수치 8항목으로 검증.
 > motion(움직임량), ghosting(잔상), no_motion(무움직임),
 > too_slow(느린 움직임), frame_escape(프레임 이탈), background_color_change(배경 변색),
 > repeated_motion(반복 모션), no_return_to_origin(원점 미복귀)을 프레임 간 픽셀 차이로 계산.
-wan_ai_validator.py (AI 검증)
+
+**wan_ai_validator.py** (AI 검증)
 수치 검증 통과 후 Gemini Vision으로 영상 품질을 추가 검증.
 > 사람 눈으로 봤을 때 자연스러운지 판단.
 > unnatural_movement, character_inconsistency, speed_too_slow 등을 감지,
 > 실패 시 프롬프트 조정 힌트(fps 변경, negative 추가)를 반환.
-wan_mask_generator.py (마스크 생성)
+
+**wan_mask_generator.py** (마스크 생성)
 Vision Analyzer가 결정한 moving zone을 흑백 마스크 PNG로 생성.
 > 검정(0)=움직이는 영역, 흰색(255)=고정 영역. 후처리 합성에서 고정 부위를 원본으로 덮어쓸 때 사용.
 > 경계에 Gaussian blur를 적용하여 자연스러운 전환을 생성.
-wan_bg_remover.py (배경 제거)
+
+**wan_bg_remover.py** (배경 제거)
 성공한 영상에서 배경을 제거하여 투명 PNG 시퀀스 + APNG + WebM을 생성.
-> 첫 프레임 테두리 색상으로 배경색을 감지하고, flood fill로 테두리와 연결된 배경만 투명 처리합.
+> 첫 프레임 테두리 색상으로 배경색을 감지하고, flood fill로 테두리와 연결된 배경만 투명 처리.
 > 캐릭터 내부 색상(흰색 배 등)은 보존.
-실행 순서
+
+### 실행 순서
+```
 이미지 입력
   → wan_vision_analyzer (분석)
   → wan_mask_generator (마스크)
@@ -40,6 +51,8 @@ wan_bg_remover.py (배경 제거)
   → wan_ai_validator (AI 검증)
   → wan_backend (후처리 합성 with 마스크)
   → wan_bg_remover (배경 제거 → APNG + WebM)
+```
+
 ---
 
 ## 목차
@@ -71,6 +84,7 @@ wan_bg_remover.py (배경 제거)
    - 8-4. [ComfyUI 버전 고정 (VRAM 행 방지)](#8-4-comfyui-버전-고정)
    - 8-5. [VRAM 누수 문제 확인 + 초기화 기능 추가](#8-5-vram-초기화)
    - 8-6. [검증 실패 통계 + 보완 조치 추적 기능](#8-6-검증-통계)
+   - 8-7. [pingpong/bg_type/bg_remove AI 동적 판단](#8-7-pingpong-동적-판단)
 9. [PENDING](#9-pending)
 
 ---
@@ -102,9 +116,10 @@ wan_bg_remover.py (배경 제거)
 |---|---|---|
 | 해상도 | 480×480 | |
 | steps | 20 | 원래 30 → 33% 시간 단축 |
-| pingpong | True | 순방향→역방향 루프로 이음새 완화 |
+| pingpong | **AI 동적 결정** | 포즈 기반 판단: 정지=True, 이동=False |
 | frames | AI 동적 결정 | 17~81 범위, 권장 17~49 |
-| MAX_RETRIES | **10** | 이미지당 최대 생성 시도 횟수 |
+| MAX_RETRIES | **5** | 이미지당 최대 생성 시도 횟수 |
+| CONSECUTIVE_FAIL | **2** | 연속 실패 시 액션 전환 임계값 |
 | WAN 모델 | wan2.1-i2v-14b-480p-Q3_K_S.gguf | |
 | Gemini 모델 | gemini-2.5-flash | 분석 + 검증 모두 사용 |
 
@@ -119,23 +134,28 @@ generate(image_path)
   │
   ├─ Step 1: WanVisionAnalyzer.analyze()
   │    Gemini Vision으로 이미지 분석 → 액션·프롬프트·수치 전부 결정
+  │    + pingpong (포즈 기반 이동 감지), bg_type (solid/scene), bg_remove 판단
+  │
+  ├─ Step 1.5: BG 프롬프트 분기
+  │    bg_type=solid → 흰색 배경 보호 문구 (BG_POSITIVE/BG_NEGATIVE)
+  │    bg_type=scene → 배경 유지 문구 ("背景保持不变")
   │
   ├─ Step 2: ComfyUIClient.upload_image()
   │
   ├─ Step 2.5: WanMaskGenerator.generate()
   │    moving_zone bbox → 흑백 마스크 PNG 생성
-  │    (SetLatentNoiseMask는 WAN video latent 5D 비호환 → 픽셀 레벨 후처리로 대체)
   │
   └─ Step 3: for attempt in range(1, MAX_RETRIES + 1):
        ├─ VRAM 측정 (nvidia-smi)
-       ├─ _generate_one() → ComfyUI 생성 → mp4 다운로드
-       ├─ WanBgRemover() → 투명 PNG + APNG + WebM (매 시도마다 실행)
+       ├─ _generate_one() → ComfyUI 생성 (pingpong=analysis.pingpong) → mp4 다운로드
        ├─ WanValidator.validate() — 수치 검증 8항목
        ├─ (수치 통과 시) WanAIValidator.validate() — Gemini Vision 영상 검증
        ├─ (AI 통과 시) _apply_post_compositing()
-       │   successful_results.append(result); continue  ← return 대신
+       │   → bg_remove=True이면 WanBgRemover() → 투명 PNG + APNG + WebM
+       │   → bg_remove=False이면 배경 제거 스킵
+       │   successful_results.append(result); continue
        └─ (AI 실패 시) AI 조정값 적용 후 다음 시도
-            연속 품질 실패 3회 → analyze_with_exclusion()으로 액션 전환
+            연속 품질 실패 2회 → analyze_with_exclusion()으로 액션 전환
 
   루프 종료 후: 통계 터미널 출력 → 파일 저장 → VRAM 초기화
                → successful_results[0] 반환 또는 WanResult(success=False)
@@ -935,9 +955,9 @@ Git 레포: https://github.com/solidSnakesado/Create_image_motion/tree/dev
 
 | 파일 | 줄수 | 역할 |
 |---|---|---|
-| `wan_backend.py` | 2173 | 메인 오케스트레이터. 전체 흐름 제어 + VRAM 초기화/모니터링 + 검증 통계 + 로그 파서 |
+| `wan_backend.py` | 2197 | 메인 오케스트레이터. 전체 흐름 제어 + VRAM 초기화/모니터링 + 검증 통계 + 로그 파서 |
 | `wan_ai_validator.py` | 541 | Gemini Vision으로 영상 품질 검증 |
-| `wan_vision_analyzer.py` | 436 | Gemini Vision으로 이미지 분석 + 프롬프트/수치 결정 |
+| `wan_vision_analyzer.py` | 491 | Gemini Vision으로 이미지 분석 + 프롬프트/수치/pingpong/bg_type 결정 |
 | `wan_validator.py` | 708 | 수치 기반 8항목 검증 |
 | `wan_mask_generator.py` | 104 | moving_zone → 흑백 마스크 PNG |
 | `wan_bg_remover.py` | 254 | flood fill 배경 제거 → APNG + WebM |
@@ -1192,6 +1212,43 @@ free_memory()              → VRAM 초기화
 
 ---
 
+### 8-7. pingpong / bg_type / bg_remove AI 동적 판단
+**날짜:** 2026-03-10
+
+**배경:**
+기존에는 `pingpong=True`가 하드코딩되어 모든 영상이 왕복 루프였음.
+오토바이 주행, 걸어가는 뒷모습 등 한 방향 이동 이미지에서는 역재생이 부자연스러움.
+
+**구현:**
+
+`VisionAnalysisResult`에 3개 필드 추가:
+- `pingpong` (bool): 왕복(True) vs 단방향(False)
+- `bg_type` (str): "solid"(단색) vs "scene"(장면)
+- `bg_remove` (bool): 배경 제거 여부
+
+Vision Analyzer 프롬프트에 **STEP 8** 추가:
+
+**pingpong 판단 — CORE PRINCIPLE:**
+"이 장면을 역재생하면 자연스러운가?" + "대상이 한 방향으로 이동하고 있는가?"
+**포즈 기반 판단** — 배경 색상과 무관하게 포즈 자체로 이동 감지:
+- 걷는 자세(다리 벌어짐), 뒷모습, 탈것 위 포즈 → pingpong=false
+- 정지 자세(서 있음, 앉아 있음) → pingpong=true
+
+**bg_type에 따른 BG 프롬프트 분기:**
+| bg_type | positive | negative |
+|---|---|---|
+| solid | 纯白色背景 (순백 배경 유지) | 배경 변색/변암 금지 |
+| scene | 背景保持不变 (배경 원본 유지) | 배경 소실/흐림/왜곡 금지 |
+
+**검증 결과:**
+| 이미지 | pingpong | bg_type | bg_remove |
+|---|---|---|---|
+| 개구리 (정면, 흰 배경) | True ✅ | solid ✅ | True ✅ |
+| 오토바이 (도로 배경) | False ✅ | scene ✅ | False ✅ |
+| 걸어가는 뒷모습 (흰 배경) | False ✅ | solid ✅ | True ✅ |
+
+---
+
 ## 9. PENDING
 
 ### 완료된 항목 (1주차 → 2주차)
@@ -1203,19 +1260,26 @@ free_memory()              → VRAM 초기화
 - ✅ 검증 실패 통계 + 보완 조치 추적 기능
 - ✅ 수치 실패 시 AI 이슈도 함께 기록 (`ai_issues` 필드 추가)
 - ✅ 매 시도마다 파일 저장 + 성공 시에도 기록 (flush 방식 — remedy/ai_issues 확정 후 저장)
-- ✅ `MAX_RETRIES = 10` 변경 완료
 - ✅ VRAM 모니터링 — 매 시도마다 `nvidia-smi` 측정, 터미널 + 파일 기록
 - ✅ 요약 통계 터미널 전용 — 파일에는 개별 시도 + 구분선만 기록
 - ✅ `load_history()` 파서 — 기존(구 포맷) + 신규(신 포맷) 모두 파싱 가능
 - ✅ WebM(VP9+alpha) 출력 추가 (`wan_bg_remover.py`)
-- ✅ 매 시도마다 배경 제거 실행 (검증 통과/실패 무관, CPU 처리 ~5초)
+- ✅ AI 통계 라벨 명확화 (AI검증 단독 실패 / AI이슈 발생 분리)
+- ✅ `CONSECUTIVE_FAIL_THRESHOLD = 2` (연속 실패 2회 시 액션 전환)
+- ✅ pingpong / bg_type / bg_remove AI 동적 판단 (STEP 8 추가)
+  - Gemini Vision이 포즈 기반으로 이동 감지 → pingpong=false
+  - 배경 유형 판단 (solid/scene) → BG 프롬프트 자동 분기
+  - bg_remove 조건 처리 (scene이면 배경 제거 스킵)
+  - 포즈 기반 판단으로 흰 배경에서도 이동 포즈 정상 감지
 
 ### 남은 항목
 - 🟡 `--cache-none` 옵션 테스트 (VRAM 누수 추가 방지)
 - 🟡 **실패 이력 참조 기능** (아래 상세)
+- 🟡 실패 이력 기반 negative 프롬프트 자동 강화 (빈발 이슈 → 중국어 매핑)
 - 🟢 characters2/ + vehicles/ 40개 이미지 일괄 실행
 - 🟢 cartoon_animals/ 10개 이미지 일괄 실행
 - 🟢 validation_stats.txt 데이터 기반 검증 임계값 최적화
+- 🟢 프론트엔드 스프라이트 모션 뷰어 (React, 클릭→애니메이션 1회 재생→원본 복귀)
 
 ### 예정 기능: 실패 이력 참조 프롬프트 자동 주입
 
