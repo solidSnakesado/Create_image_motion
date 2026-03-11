@@ -246,12 +246,20 @@ STEP 8 — LOOP TYPE & BACKGROUND
      direction (forward, away, upward, etc.), pingpong MUST be false.
      The direction of travel does not reverse in reality.
 
+     IMPORTANT: Judge by the POSE, not the background.
+     A subject can be walking/running/riding even on a white or solid background.
+     Look at the body pose: are the legs mid-stride? Is the body leaning forward?
+     Is the subject seen from behind, moving away? These all mean pingpong = false,
+     regardless of whether the background is solid white or a detailed scene.
+
      pingpong = false (continue forward):
        The image implies ongoing movement through space or time.
+       The subject's pose suggests travel (walking, running, riding, flying away).
        If you played it backward, it would look unnatural.
 
      pingpong = true (return to start):
        The image implies a stationary subject doing a repeating motion.
+       The subject's pose is static (standing, sitting, perching, hovering).
        Nothing in the scene is traveling in any direction.
        Playing it forward then backward would look natural.
 
