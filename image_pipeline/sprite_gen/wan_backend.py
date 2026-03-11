@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # 설정
 # ─────────────────────────────────────────────────────────────
 
-MAX_RETRIES = 5
+MAX_RETRIES = 7
 
 COMFYUI_URL   = os.environ.get("COMFYUI_URL",   "http://127.0.0.1:8188")
 WAN_MODEL     = os.environ.get("WAN_MODEL",     "wan2.1-i2v-14b-480p-Q3_K_S.gguf")
