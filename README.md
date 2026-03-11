@@ -1,7 +1,45 @@
 # WAN I2V 파이프라인 개발 히스토리
 > 1주차: 2026-03-06 ~ 2026-03-08 | 2주차: 2026-03-09 ~ 2026-03-10
 > 목적: 검증 개발 과정 + 프롬프트 개선 과정 + 기능 수정 기록 + 환경 구성 기록
-
+> 
+wan_backend.py (메인 오케스트레이터)
+전체 흐름을 제어합니다.
+> 이미지 전처리(480 캔버스 배치),
+> ComfyUI API 통신(업로드/큐/다운로드), 생성 루프(MAX_RETRIES=7),
+> 실패 시 보완 조치(AI 조정/seed 교체/액션 전환),
+> 성공 시 후처리 합성 + 배경 제거, VRAM/RAM 초기화, 검증 통계 기록까지 모든 것을 조율.
+wan_vision_analyzer.py (이미지 분석)
+생성 전에 Gemini Vision으로 원본 이미지를 분석.
+> "이 이미지에서 어떤 부위를 어떻게 움직일 것인가"를 결정.
+> 액션, 프롬프트(중국어), fps, 프레임 수,
+> moving zone, pingpong, bg_type, bg_remove를 모두 AI가 판단하여 반환합니다.
+wan_validator.py (수치 검증)
+생성된 영상을 수치 8항목으로 검증.
+> motion(움직임량), ghosting(잔상), no_motion(무움직임),
+> too_slow(느린 움직임), frame_escape(프레임 이탈), background_color_change(배경 변색),
+> repeated_motion(반복 모션), no_return_to_origin(원점 미복귀)을 프레임 간 픽셀 차이로 계산.
+wan_ai_validator.py (AI 검증)
+수치 검증 통과 후 Gemini Vision으로 영상 품질을 추가 검증.
+> 사람 눈으로 봤을 때 자연스러운지 판단.
+> unnatural_movement, character_inconsistency, speed_too_slow 등을 감지,
+> 실패 시 프롬프트 조정 힌트(fps 변경, negative 추가)를 반환.
+wan_mask_generator.py (마스크 생성)
+Vision Analyzer가 결정한 moving zone을 흑백 마스크 PNG로 생성.
+> 검정(0)=움직이는 영역, 흰색(255)=고정 영역. 후처리 합성에서 고정 부위를 원본으로 덮어쓸 때 사용.
+> 경계에 Gaussian blur를 적용하여 자연스러운 전환을 생성.
+wan_bg_remover.py (배경 제거)
+성공한 영상에서 배경을 제거하여 투명 PNG 시퀀스 + APNG + WebM을 생성.
+> 첫 프레임 테두리 색상으로 배경색을 감지하고, flood fill로 테두리와 연결된 배경만 투명 처리합.
+> 캐릭터 내부 색상(흰색 배 등)은 보존.
+실행 순서
+이미지 입력
+  → wan_vision_analyzer (분석)
+  → wan_mask_generator (마스크)
+  → wan_backend (ComfyUI로 생성)
+  → wan_validator (수치 검증)
+  → wan_ai_validator (AI 검증)
+  → wan_backend (후처리 합성 with 마스크)
+  → wan_bg_remover (배경 제거 → APNG + WebM)
 ---
 
 ## 목차
