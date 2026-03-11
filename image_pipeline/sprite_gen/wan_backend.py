@@ -1712,6 +1712,51 @@ class WanBackend:
         # 베이스 프롬프트: 액션 전환 시에만 교체, 중간에 누적하지 않음
         base_positive = BG_POSITIVE + ", " + analysis.positive
         base_negative = analysis.negative + ", " + BG_NEGATIVE
+
+        # ── 이전 실패 이력 기반 negative 강화 ─────────────────
+        # 동일 이미지의 이전 실패 기록이 있으면, 빈발 이슈를 negative에 자동 추가
+        ISSUE_NEGATIVE_MAP = {
+            "ghosting":               "残影，鬼影，半透明残像，画面闪烁，细节闪烁",
+            "unnatural_movement":     "身体变形，身体拉伸，身体扭曲，动作不自然，轨迹突变",
+            "character_inconsistency":"风格改变，纹理重建，角色外观变化，颜色失真",
+            "no_motion":              "",  # positive 강화 대상 (negative 아님)
+            "too_slow":               "",  # positive 강화 대상 (negative 아님)
+            "background_color_change":"背景变色，背景变暗，背景变灰",
+            "frame_escape":           "画面外移动，超出边界",
+            "no_return_to_origin":    "动作不回归，姿势偏移",
+            "speed_too_fast":         "动作过快，快速移动，急速运动",
+            "speed_too_slow":         "",  # positive 강화 대상
+            "flickering":             "画面闪烁，亮度变化，闪烁不定",
+            "repeated_motion":        "重复动作，动作循环不自然",
+        }
+        history = self._stats.load_history(stem)
+        if history["total_attempts"] > 0:
+            # 이전 이력에서 이슈 빈도 집계
+            issue_counter: Counter = Counter()
+            for img_data in history["images"].values():
+                for a in img_data["attempts"]:
+                    issue_counter.update(a.get("issues", []))
+                    issue_counter.update(a.get("ai_issues", []))
+
+            # 빈도 2회 이상인 이슈만 negative에 추가
+            history_negatives = []
+            for issue, count in issue_counter.most_common():
+                if count >= 2 and ISSUE_NEGATIVE_MAP.get(issue, ""):
+                    history_negatives.append(ISSUE_NEGATIVE_MAP[issue])
+
+            if history_negatives:
+                history_neg_str = "，".join(history_negatives)
+                base_negative = base_negative + ", " + history_neg_str
+                logger.info(
+                    f"  [이력 강화] 이전 {history['total_attempts']}회 실패 기반 "
+                    f"negative 추가: {history_neg_str[:80]}..."
+                )
+            else:
+                logger.info(
+                    f"  [이력] 이전 {history['total_attempts']}회 기록 있음 "
+                    f"(빈도 2회 이상 이슈 없음 → 강화 스킵)"
+                )
+        # ──────────────────────────────────────────────────────
         # 조정 프롬프트: 매 시도 후 실패 원인에 맞게 교체 (누적 금지)
         adj_positive  = ""
         adj_negative  = ""
@@ -1744,7 +1789,7 @@ class WanBackend:
             vram_str = f"VRAM={vram_pre['used']}MB/{vram_pre['total']}MB" if vram_pre else ""
             logger.info(
                 f"\n  [시도 {attempt}/{MAX_RETRIES}] "
-                f"seed={seed} fps={current_fps} scale={current_scale:.2f}"
+                f"seed={seed} fps={current_fps}"
                 f" {vram_str}"
             )
 
