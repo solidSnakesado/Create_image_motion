@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>WAN Motion Pipeline</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&family=Outfit:wght@400;500;600;700&display=swap');
+:root {
+  --bg:#0a0c10;--bg2:#0e1117;--surf:#13161f;--card:#181c28;
+  --bdr:#1e2434;--bdr2:#283048;
+  --txt:#d0d8ec;--mid:#6878a0;--dim:#384060;
+  --accent:#38bdf8;--green:#34d399;--yellow:#fbbf24;--red:#f87171;--purple:#a78bfa;
+  --mono:'JetBrains Mono',monospace;--sans:'Outfit',sans-serif;
+  --radius:10px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--sans)}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--bdr2);border-radius:3px}
+
+.app{display:flex;flex-direction:column;height:100vh}
+.topbar{height:46px;display:flex;align-items:center;gap:14px;padding:0 20px;background:var(--surf);border-bottom:1px solid var(--bdr);flex-shrink:0}
+.topbar h1{font-size:14px;font-weight:700;color:var(--accent);letter-spacing:.04em}
+.topbar span{font-family:var(--mono);font-size:10px;color:var(--dim)}
+
+.main{flex:1;display:flex;overflow:hidden}
+.sidebar{width:320px;border-right:1px solid var(--bdr);display:flex;flex-direction:column;background:var(--bg2)}
+.content{flex:1;overflow-y:auto;padding:24px}
+
+/* Sidebar */
+.sb-section{padding:16px;border-bottom:1px solid var(--bdr)}
+.sb-section h3{font-size:11px;text-transform:uppercase;color:var(--mid);letter-spacing:.08em;margin-bottom:10px}
+.sb-input{width:100%;background:var(--surf);border:1px solid var(--bdr);color:var(--txt);padding:8px 10px;border-radius:6px;font-family:var(--mono);font-size:12px;outline:none}
+.sb-input:focus{border-color:var(--accent)}
+.sb-input::placeholder{color:var(--dim)}
+.btn{padding:8px 16px;border:none;border-radius:6px;font-family:var(--sans);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
+.btn-primary{background:var(--accent);color:#000}.btn-primary:hover{filter:brightness(1.15)}
+.btn-primary:disabled{opacity:.4;cursor:not-allowed}
+.btn-secondary{background:var(--bdr2);color:var(--txt)}.btn-secondary:hover{background:var(--bdr)}
+.btn-sm{padding:5px 10px;font-size:11px}
+.btn-row{display:flex;gap:8px;margin-top:10px}
+
+/* Cards */
+.card{background:var(--card);border:1px solid var(--bdr);border-radius:var(--radius);padding:16px;margin-bottom:16px}
+.card-title{font-size:13px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.card-title .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+
+/* Status badges */
+.badge{display:inline-flex;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;font-family:var(--mono)}
+.badge-kf{background:rgba(52,211,153,.15);color:var(--green)}
+.badge-motion{background:rgba(56,189,248,.15);color:var(--accent)}
+.badge-scene{background:rgba(167,139,250,.15);color:var(--purple)}
+.badge-warn{background:rgba(251,191,36,.15);color:var(--yellow)}
+.badge-err{background:rgba(248,113,113,.15);color:var(--red)}
+
+/* Classification result */
+.classify-result{display:grid;grid-template-columns:100px 1fr;gap:4px 12px;font-size:12px;margin-top:8px}
+.classify-result dt{color:var(--mid);font-family:var(--mono);font-size:11px}
+.classify-result dd{color:var(--txt)}
+
+/* Video grid */
+.video-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.video-card{background:var(--surf);border:1px solid var(--bdr);border-radius:8px;overflow:hidden;cursor:pointer;transition:border-color .15s}
+.video-card:hover{border-color:var(--accent)}
+.video-card.selected{border-color:var(--green);box-shadow:0 0 0 2px rgba(52,211,153,.2)}
+.video-card video{width:100%;display:block;background:#000}
+.video-card .meta{padding:8px;font-size:11px;color:var(--mid);font-family:var(--mono)}
+
+/* Lottie preview */
+.lottie-preview{background:repeating-conic-gradient(#1a1e2a 0% 25%,#14171f 0% 50%) 50%/16px 16px;border-radius:8px;display:flex;align-items:center;justify-content:center;min-height:280px;position:relative;overflow:hidden}
+
+/* Steps */
+.step{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--bdr);cursor:pointer;transition:background .1s}
+.step:hover{background:var(--surf)}
+.step.active{background:var(--surf);border-left:3px solid var(--accent)}
+.step.done{opacity:.7}
+.step-num{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;font-family:var(--mono);flex-shrink:0;border:1.5px solid var(--bdr2);color:var(--mid)}
+.step.active .step-num{border-color:var(--accent);color:var(--accent)}
+.step.done .step-num{border-color:var(--green);color:var(--green);background:rgba(52,211,153,.1)}
+.step-label{font-size:12px;font-weight:500}
+.step-sub{font-size:10px;color:var(--dim);margin-top:2px}
+
+/* Log area */
+.log{background:var(--bg);border:1px solid var(--bdr);border-radius:6px;padding:10px;font-family:var(--mono);font-size:10px;color:var(--mid);max-height:200px;overflow-y:auto;white-space:pre-wrap;line-height:1.6}
+
+/* Spinner */
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--bdr2);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Image preview */
+.img-preview{max-width:100%;max-height:240px;border-radius:8px;background:repeating-conic-gradient(#1a1e2a 0% 25%,#14171f 0% 50%) 50%/16px 16px}
+
+/* File dialog overlay */
+.dialog-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;display:flex;align-items:center;justify-content:center}
+.dialog{background:var(--card);border:1px solid var(--bdr2);border-radius:12px;width:540px;max-height:70vh;display:flex;flex-direction:column;overflow:hidden}
+.dialog-header{padding:12px 16px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;justify-content:space-between}
+.dialog-header h3{font-size:13px;font-weight:600}
+.dialog-close{background:none;border:none;color:var(--mid);cursor:pointer;font-size:18px;padding:0 4px}
+.dialog-close:hover{color:var(--txt)}
+.dialog-path{padding:8px 16px;font-family:var(--mono);font-size:11px;color:var(--mid);border-bottom:1px solid var(--bdr);background:var(--surf);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dialog-body{flex:1;overflow-y:auto;padding:4px 0}
+.dialog-item{display:flex;align-items:center;gap:10px;padding:8px 16px;cursor:pointer;font-size:12px;transition:background .1s}
+.dialog-item:hover{background:var(--surf)}
+.dialog-item.selected{background:rgba(56,189,248,.1);border-left:3px solid var(--accent)}
+.dialog-icon{font-size:15px;width:20px;text-align:center;flex-shrink:0}
+.dialog-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dialog-size{font-family:var(--mono);font-size:10px;color:var(--dim)}
+.dialog-preview{padding:12px 16px;border-top:1px solid var(--bdr);text-align:center}
+.dialog-preview img{max-height:120px;border-radius:6px;background:repeating-conic-gradient(#1a1e2a 0% 25%,#14171f 0% 50%) 50%/12px 12px}
+.dialog-footer{padding:10px 16px;border-top:1px solid var(--bdr);display:flex;justify-content:flex-end;gap:8px}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- Top Bar -->
+<div class="topbar">
+  <h1>WAN Motion Pipeline</h1>
+  <span>v4.0 — Stage 1 → Motion → Lottie → Stage 2</span>
+</div>
+
+<div class="main">
+<!-- Sidebar: Steps -->
+<div class="sidebar">
+  <div class="sb-section">
+    <h3>Image</h3>
+    <div id="selectedFile" style="font-family:var(--mono);font-size:11px;color:var(--mid);margin-bottom:8px;word-break:break-all">파일을 선택하세요</div>
+    <div id="selectedThumb" style="text-align:center;margin-bottom:8px"></div>
+    <input id="imagePath" type="hidden">
+    <div class="btn-row">
+      <button class="btn btn-secondary" onclick="openFileDialog()">이미지 선택</button>
+      <button class="btn btn-primary" id="btnClassify" onclick="runClassify()" disabled>분석 시작</button>
+    </div>
+  </div>
+
+  <div id="stepList">
+    <div class="step active" data-step="1" onclick="showStep(1)">
+      <div class="step-num">1</div>
+      <div><div class="step-label">이미지 분류</div><div class="step-sub">Stage 1: keyframe / motion</div></div>
+    </div>
+    <div class="step" data-step="2" onclick="showStep(2)">
+      <div class="step-num">2</div>
+      <div><div class="step-label">모션 생성</div><div class="step-sub">WAN I2V (7회 시도)</div></div>
+    </div>
+    <div class="step" data-step="3" onclick="showStep(3)">
+      <div class="step-num">3</div>
+      <div><div class="step-label">영상 선택</div><div class="step-sub">생성 결과 중 선택</div></div>
+    </div>
+    <div class="step" data-step="4" onclick="showStep(4)">
+      <div class="step-num">4</div>
+      <div><div class="step-label">배경 제거 + Lottie</div><div class="step-sub">PNG → Lottie JSON</div></div>
+    </div>
+    <div class="step" data-step="5" onclick="showStep(5)">
+      <div class="step-num">5</div>
+      <div><div class="step-label">키프레임 판단</div><div class="step-sub">Stage 2: travel 여부</div></div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="sb-section" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+    <h3>Log</h3>
+    <div id="logArea" class="log" style="flex:1"></div>
+  </div>
+</div>
+
+<!-- Content -->
+<div class="content" id="contentArea">
+  <!-- Step 1: Classification -->
+  <div id="panel1" class="panel">
+    <div class="card">
+      <div class="card-title"><div class="dot" style="background:var(--accent)"></div>Stage 1 — 이미지 분류</div>
+      <p style="font-size:12px;color:var(--mid);margin-bottom:12px">이미지 경로를 입력하고 "분석 시작"을 누르면 키프레임만 필요한지, 모션 생성이 필요한지 판단합니다.</p>
+      <div id="classifyPreview" style="text-align:center;margin-bottom:12px"></div>
+      <div id="classifyResult"></div>
+    </div>
+    <!-- KEYFRAME_ONLY 결과 (키프레임 미리보기) -->
+    <div class="card" id="kfResultCard" style="display:none">
+      <div class="card-title"><div class="dot" style="background:var(--green)"></div>키프레임 생성 완료</div>
+      <div id="kfInfo" style="margin-bottom:12px"></div>
+
+      <!-- 미리보기 -->
+      <!-- 스테이지 미리보기 -->
+      <div style="margin-bottom:8px;display:flex;align-items:center;gap:12px;font-size:12px">
+        <label style="color:var(--mid)">스테이지 크기</label>
+        <select id="kfStageSize" onchange="updateStageSize()" style="background:var(--surf);border:1px solid var(--bdr);color:var(--txt);padding:3px 8px;border-radius:4px;font-size:11px">
+          <option value="400x300">400×300</option>
+          <option value="600x400">600×400</option>
+          <option value="800x600" selected>800×600</option>
+          <option value="1024x768">1024×768</option>
+        </select>
+        <label style="color:var(--mid)">배경</label>
+        <select id="kfStageBg" onchange="updateStageBg()" style="background:var(--surf);border:1px solid var(--bdr);color:var(--txt);padding:3px 8px;border-radius:4px;font-size:11px">
+          <option value="checker">체크무늬 (투명)</option>
+          <option value="white">흰색</option>
+          <option value="sky">하늘색</option>
+          <option value="dark">어두운색</option>
+          <option value="custom">커스텀 이미지</option>
+        </select>
+        <input id="kfStageBgCustom" type="text" placeholder="배경 이미지 경로" class="sb-input" style="width:180px;display:none;font-size:11px" onchange="updateStageBg()">
+        <label style="color:var(--mid)">오브젝트 크기</label>
+        <input type="range" id="kfObjScale" min="10" max="200" value="80" step="5" style="width:80px" oninput="document.getElementById('kfObjScaleVal').textContent=this.value+'px';updateObjInStage()">
+        <span id="kfObjScaleVal" style="font-family:var(--mono);color:var(--txt);min-width:36px">80px</span>
+      </div>
+      <div id="kfStageWrap" style="width:100%;overflow:hidden;border-radius:8px;border:1px solid var(--bdr);position:relative">
+        <div id="kfStage" style="width:800px;height:600px;position:relative;margin:0 auto;overflow:hidden;background:repeating-conic-gradient(#1a1e2a 0% 25%,#14171f 0% 50%) 50%/16px 16px">
+          <!-- 오브젝트가 여기 배치됨 -->
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--dim);margin-top:4px;font-family:var(--mono)" id="kfStageInfo">스테이지: 800×600 | 오브젝트 위치: center</div>
+
+      <!-- 슬라이더 편집 영역 -->
+      <div id="kfEditorArea" style="margin-top:16px">
+        <div style="font-size:12px;font-weight:500;color:var(--txt);margin-bottom:10px">키프레임 조정</div>
+
+        <div style="display:grid;grid-template-columns:100px 1fr 50px;gap:6px 12px;align-items:center;font-size:12px">
+          <label style="color:var(--mid)">모션 모드</label>
+          <select id="kfMotionMode" style="background:var(--surf);border:1px solid var(--bdr);color:var(--txt);padding:4px 8px;border-radius:4px;font-size:12px">
+            <option value="oscillate">진동 (왕복)</option>
+            <option value="oneway">한 방향 이동 (이동 후 멈춤)</option>
+          </select>
+          <span></span>
+
+          <label style="color:var(--mid)">진폭 (amplitude)</label>
+          <input type="range" id="kfSliderAmplitude" min="0.1" max="10.0" step="0.1" value="1.0">
+          <span id="kfValAmplitude" style="font-family:var(--mono);color:var(--txt)">1.0x</span>
+
+          <label style="color:var(--mid)">속도 (duration)</label>
+          <input type="range" id="kfSliderDuration" min="200" max="5000" step="50" value="1000">
+          <span id="kfValDuration" style="font-family:var(--mono);color:var(--txt)">1000ms</span>
+
+          <label style="color:var(--mid)">이동X (px)</label>
+          <input type="range" id="kfSliderTX" min="-500" max="500" step="5" value="0">
+          <span id="kfValTX" style="font-family:var(--mono);color:var(--txt)">0px</span>
+
+          <label style="color:var(--mid)">이동Y (px)</label>
+          <input type="range" id="kfSliderTY" min="-500" max="500" step="5" value="0">
+          <span id="kfValTY" style="font-family:var(--mono);color:var(--txt)">0px</span>
+
+          <label style="color:var(--mid)">rotate (°)</label>
+          <input type="range" id="kfSliderRotate" min="-180" max="180" step="1" value="0">
+          <span id="kfValRotate" style="font-family:var(--mono);color:var(--txt)">0°</span>
+
+          <label style="color:var(--mid)">scale</label>
+          <input type="range" id="kfSliderScale" min="0.1" max="3.0" step="0.05" value="1.0">
+          <span id="kfValScale" style="font-family:var(--mono);color:var(--txt)">1.0x</span>
+        </div>
+
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn-primary btn-sm" onclick="applyKfEdits()">적용 + 미리보기</button>
+          <button class="btn btn-secondary btn-sm" onclick="resetKfEdits()">초기화</button>
+          <button class="btn btn-secondary btn-sm" onclick="exportKfJson()">JSON 내보내기</button>
+        </div>
+      </div>
+
+      <div id="kfJsonPath" style="font-size:11px;color:var(--dim);margin-top:8px;font-family:var(--mono)"></div>
+    </div>
+  </div>
+
+  <!-- Step 2: Generation -->
+  <div id="panel2" class="panel" style="display:none">
+    <div class="card">
+      <div class="card-title"><div class="dot" style="background:var(--yellow)"></div>모션 생성</div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <label style="font-size:12px;color:var(--mid);white-space:nowrap">생성 횟수</label>
+        <input id="maxRetries" type="number" min="1" max="20" value="7" class="sb-input" style="width:70px">
+        <span style="font-size:10px;color:var(--dim)">회 (기본 7)</span>
+      </div>
+      <div id="genStatus" style="font-size:12px;color:var(--mid)">대기 중</div>
+      <div class="btn-row">
+        <button id="btnGenerate" class="btn btn-primary" onclick="runGenerate()" disabled>모션 생성 시작</button>
+        <button id="btnSkipToSelect" class="btn btn-secondary" onclick="skipToSelect()" style="display:none">기존 영상으로 진행</button>
+      </div>
+    </div>
+    <!-- 실패 통계 그래프 -->
+    <div class="card" id="statsCard" style="display:none">
+      <div class="card-title"><div class="dot" style="background:var(--purple)"></div>생성 통계</div>
+      <div style="display:flex;gap:16px;margin-bottom:12px">
+        <div id="statsSummary" style="font-size:12px;color:var(--mid)"></div>
+      </div>
+      <canvas id="statsChart" height="160"></canvas>
+      <div id="statsIssues" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <!-- Step 3: Video selection -->
+  <div id="panel3" class="panel" style="display:none">
+    <div class="card">
+      <div class="card-title"><div class="dot" style="background:var(--green)"></div>영상 선택</div>
+      <!-- 탭 -->
+      <div style="display:flex;gap:0;margin-bottom:12px;border-bottom:1px solid var(--bdr)">
+        <button id="tabCurrent" class="btn btn-sm" style="border:none;border-bottom:2px solid var(--accent);color:var(--accent);border-radius:0;padding:6px 16px" onclick="switchVideoTab('current')">현재 이미지</button>
+        <button id="tabAll" class="btn btn-sm" style="border:none;border-bottom:2px solid transparent;color:var(--mid);border-radius:0;padding:6px 16px" onclick="switchVideoTab('all')">전체 영상</button>
+      </div>
+      <p id="videoTabDesc" style="font-size:12px;color:var(--mid);margin-bottom:12px">현재 이미지에서 생성된 영상입니다.</p>
+      <div id="videoGrid" class="video-grid"></div>
+      <div class="btn-row">
+        <button id="btnSelect" class="btn btn-primary" onclick="runSelectVideo()" disabled>선택한 영상으로 진행</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 4: BG remove + Lottie -->
+  <div id="panel4" class="panel" style="display:none">
+    <div class="card">
+      <div class="card-title"><div class="dot" style="background:var(--purple)"></div>배경 제거 + Lottie 변환</div>
+      <div id="lottieStatus" style="font-size:12px;color:var(--mid);margin-bottom:12px">대기 중</div>
+      <div id="lottiePreview" class="lottie-preview" style="display:none"></div>
+      <div id="lottieInfo"></div>
+    </div>
+  </div>
+
+  <!-- Step 5: Post-motion classify -->
+  <div id="panel5" class="panel" style="display:none">
+    <div class="card">
+      <div class="card-title"><div class="dot" style="background:var(--accent)"></div>Stage 2 — 키프레임 이동 판단</div>
+      <p style="font-size:12px;color:var(--mid);margin-bottom:12px">생성된 모션 영상을 분석하여 키프레임 이동이 필요한지 판단합니다.</p>
+      <div class="btn-row">
+        <button id="btnStage2" class="btn btn-primary" onclick="runStage2()" disabled>키프레임 판단 실행</button>
+      </div>
+      <div id="stage2Result" style="margin-top:12px"></div>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+
+<!-- Lottie Player (CDN) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+<!-- Chart.js (CDN) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+<!-- File Dialog -->
+<div id="fileDialog" class="dialog-overlay" style="display:none">
+  <div class="dialog">
+    <div class="dialog-header">
+      <h3>이미지 선택</h3>
+      <button class="dialog-close" onclick="closeFileDialog()">✕</button>
+    </div>
+    <div id="dialogPath" class="dialog-path"></div>
+    <div id="dialogBody" class="dialog-body"></div>
+    <div id="dialogPreview" class="dialog-preview" style="display:none"></div>
+    <div class="dialog-footer">
+      <button class="btn btn-secondary btn-sm" onclick="closeFileDialog()">취소</button>
+      <button id="btnDialogSelect" class="btn btn-primary btn-sm" onclick="confirmFileSelect()" disabled>선택</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:5001';
+let state = {
+  imagePath: '',
+  stem: '',
+  classifyResult: null,
+  jobId: null,
+  videos: [],
+  selectedVideo: null,
+  lottieData: null,
+  lottieAnim: null,
+};
+
+// ── File Dialog ──────────────────────────────────────────────
+
+let dialogState = { currentDir: '', selectedPath: '' };
+
+function openFileDialog() {
+  document.getElementById('fileDialog').style.display = 'flex';
+  const startDir = dialogState.currentDir || '/home';
+  browseDir(startDir);
+}
+
+function closeFileDialog() {
+  document.getElementById('fileDialog').style.display = 'none';
+}
+
+async function browseDir(dir) {
+  dialogState.currentDir = dir;
+  dialogState.selectedPath = '';
+  document.getElementById('dialogPath').textContent = dir;
+  document.getElementById('dialogPreview').style.display = 'none';
+  document.getElementById('btnDialogSelect').disabled = true;
+
+  const body = document.getElementById('dialogBody');
+  body.innerHTML = '<div style="padding:16px;color:var(--dim)">로딩 중...</div>';
+
+  try {
+    const res = await fetch(`${API}/api/browse?dir=${encodeURIComponent(dir)}`);
+    const data = await res.json();
+    if (data.error) { body.innerHTML = `<div style="padding:16px;color:var(--red)">${data.error}</div>`; return; }
+
+    body.innerHTML = '';
+    data.entries.forEach(entry => {
+      const div = document.createElement('div');
+      div.className = 'dialog-item';
+      const icon = entry.type === 'dir' ? '📁' : '🖼️';
+      const size = entry.size_kb ? `${entry.size_kb}KB` : '';
+      div.innerHTML = `<span class="dialog-icon">${icon}</span><span class="dialog-name">${entry.name}</span><span class="dialog-size">${size}</span>`;
+
+      if (entry.type === 'dir') {
+        div.ondblclick = () => browseDir(entry.path);
+        div.onclick = () => browseDir(entry.path);
+      } else {
+        div.onclick = () => selectFileInDialog(entry.path, entry.name, div);
+        div.ondblclick = () => { selectFileInDialog(entry.path, entry.name, div); confirmFileSelect(); };
+      }
+      body.appendChild(div);
+    });
+  } catch (e) {
+    body.innerHTML = `<div style="padding:16px;color:var(--red)">Error: ${e.message}</div>`;
+  }
+}
+
+function selectFileInDialog(path, name, el) {
+  dialogState.selectedPath = path;
+  document.querySelectorAll('.dialog-item').forEach(d => d.classList.remove('selected'));
+  el.classList.add('selected');
+  document.getElementById('btnDialogSelect').disabled = false;
+
+  const preview = document.getElementById('dialogPreview');
+  preview.style.display = 'block';
+  preview.innerHTML = `<img src="${API}/api/files/${path}" 
+    style="max-height:120px;border-radius:6px" onerror="this.parentElement.style.display='none'">
+    <div style="font-size:11px;color:var(--mid);margin-top:6px">${name}</div>`;
+}
+
+function confirmFileSelect() {
+  if (!dialogState.selectedPath) return;
+  state.imagePath = dialogState.selectedPath;
+  state.stem = dialogState.selectedPath.split('/').pop().replace(/\.[^.]+$/, '');
+
+  document.getElementById('imagePath').value = dialogState.selectedPath;
+  document.getElementById('selectedFile').textContent = dialogState.selectedPath;
+  document.getElementById('selectedThumb').innerHTML =
+    `<img src="${API}/api/files/${dialogState.selectedPath}" 
+      style="max-height:80px;border-radius:6px" onerror="this.style.display='none'">`;
+  document.getElementById('btnClassify').disabled = false;
+  closeFileDialog();
+  log('이미지 선택: ' + dialogState.selectedPath);
+}
+
+function log(msg) {
+  const el = document.getElementById('logArea');
+  const time = new Date().toLocaleTimeString('ko', {hour12:false});
+  el.textContent += `[${time}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function showStep(n) {
+  document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
+  document.getElementById('panel' + n).style.display = 'block';
+  document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+  document.querySelector(`.step[data-step="${n}"]`).classList.add('active');
+}
+
+function markDone(n) {
+  document.querySelector(`.step[data-step="${n}"]`).classList.add('done');
+}
+
+// ── Step 1: Classify ─────────────────────────────────────────
+
+async function runClassify() {
+  const path = state.imagePath;
+  if (!path) return alert('이미지를 선택하세요');
+
+  log('Stage 1 분류 시작: ' + path);
+  document.getElementById('classifyResult').innerHTML = '<div class="spinner"></div>';
+
+  // 이미지 미리보기
+  document.getElementById('classifyPreview').innerHTML =
+    `<img class="img-preview" src="${API}/api/files/${path}" onerror="this.style.display='none'">`;
+
+  try {
+    const res = await fetch(`${API}/api/classify`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image_path: path}),
+    });
+    const data = await res.json();
+    state.classifyResult = data;
+
+    const isKF = data.processing_mode === 'keyframe_only';
+    const badge = isKF ? '<span class="badge badge-kf">KEYFRAME ONLY</span>'
+                       : data.is_scene ? '<span class="badge badge-scene">MOTION (SCENE)</span>'
+                       : '<span class="badge badge-motion">MOTION NEEDED</span>';
+
+    document.getElementById('classifyResult').innerHTML = `
+      <div style="margin-bottom:10px">${badge}</div>
+      <dl class="classify-result">
+        <dt>mode</dt><dd>${data.processing_mode}</dd>
+        <dt>facing</dt><dd>${data.facing_direction}</dd>
+        <dt>deformable</dt><dd>${data.has_deformable}</dd>
+        <dt>scene</dt><dd>${data.is_scene}</dd>
+        <dt>subject</dt><dd>${data.subject_desc}</dd>
+        <dt>action</dt><dd>${data.suggested_action || '—'}</dd>
+        <dt>reason</dt><dd>${data.reason}</dd>
+      </dl>`;
+
+    log('Stage 1 결과: ' + data.processing_mode);
+    markDone(1);
+
+    if (!isKF) {
+      document.getElementById('btnGenerate').disabled = false;
+
+      // 기존 영상이 있는지 확인
+      const existing = data.existing_videos || [];
+      if (existing.length > 0) {
+        state.videos = existing;
+        log(`기존 영상 ${existing.length}개 발견 — 바로 선택 가능`);
+
+        document.getElementById('genStatus').innerHTML =
+          `<span class="badge badge-motion">기존 영상 ${existing.length}개 있음</span>` +
+          `<span style="font-size:11px;color:var(--mid);margin-left:8px">새로 생성하거나, 기존 영상으로 바로 진행할 수 있습니다.</span>`;
+        document.getElementById('btnSkipToSelect').style.display = 'inline-flex';
+
+        renderVideoGrid(existing);
+        document.getElementById('panel3').style.display = 'block';
+
+        showStep(2);
+      } else {
+        document.getElementById('btnSkipToSelect').style.display = 'none';
+        showStep(2);
+      }
+    } else {
+      // KEYFRAME_ONLY — 키프레임 결과 표시 + 미리보기
+      const kfData = data.keyframe_config;
+      if (kfData) {
+        document.getElementById('kfResultCard').style.display = 'block';
+        document.getElementById('kfInfo').innerHTML = `
+          <dl class="classify-result">
+            <dt>type</dt><dd>${kfData.animation_type}</dd>
+            <dt>duration</dt><dd>${kfData.duration_ms}ms</dd>
+            <dt>easing</dt><dd>${kfData.easing}</dd>
+            <dt>keyframes</dt><dd>${kfData.keyframes.length}개</dd>
+            <dt>loop</dt><dd>${kfData.loop}</dd>
+            <dt>origin</dt><dd>${kfData.transform_origin}</dd>
+          </dl>`;
+        if (kfData.json_path) {
+          document.getElementById('kfJsonPath').textContent = kfData.json_path;
+        }
+
+        // 키프레임 미리보기: 원본 이미지에 CSS 애니메이션 적용
+        playKeyframePreview(kfData);
+        log('키프레임 생성 완료: ' + kfData.animation_type + ' ' + kfData.duration_ms + 'ms');
+      }
+    }
+  } catch (e) {
+    log('Error: ' + e.message);
+    document.getElementById('classifyResult').innerHTML = `<span class="badge badge-err">Error: ${e.message}</span>`;
+  }
+}
+
+// ── Keyframe Preview (KEYFRAME_ONLY 미리보기) ────────────────
+
+function playKeyframePreview(kfData) {
+  state.originalKfData = JSON.parse(JSON.stringify(kfData)); // 원본 보존
+  state.currentKfData = JSON.parse(JSON.stringify(kfData));
+
+  // 슬라이더 초기값 설정
+  document.getElementById('kfSliderDuration').value = kfData.duration_ms;
+  document.getElementById('kfValDuration').textContent = kfData.duration_ms + 'ms';
+  document.getElementById('kfSliderAmplitude').value = 1.0;
+  document.getElementById('kfValAmplitude').textContent = '1.0x';
+  document.getElementById('kfSliderTX').value = 0;
+  document.getElementById('kfValTX').textContent = '0px';
+  document.getElementById('kfSliderTY').value = 0;
+  document.getElementById('kfValTY').textContent = '0px';
+  document.getElementById('kfSliderRotate').value = 0;
+  document.getElementById('kfValRotate').textContent = '0°';
+  document.getElementById('kfSliderScale').value = 1.0;
+  document.getElementById('kfValScale').textContent = '1.0x';
+
+  // 슬라이더 실시간 표시 연결
+  ['Amplitude','Duration','TX','TY','Rotate','Scale'].forEach(name => {
+    const slider = document.getElementById('kfSlider' + name);
+    const val = document.getElementById('kfVal' + name);
+    slider.oninput = () => {
+      const v = parseFloat(slider.value);
+      if (name === 'Duration') val.textContent = Math.round(v) + 'ms';
+      else if (name === 'Amplitude' || name === 'Scale') val.textContent = v.toFixed(1) + 'x';
+      else if (name === 'Rotate') val.textContent = Math.round(v) + '°';
+      else val.textContent = Math.round(v) + 'px';
+    };
+  });
+
+  _renderKfPreview(kfData);
+}
+
+function _renderKfPreview(kfData) {
+  const stage = document.getElementById('kfStage');
+  // 기존 오브젝트 제거 (배경은 유지)
+  const existing = stage.querySelector('.kf-obj');
+  if (existing) existing.remove();
+
+  const objSize = parseInt(document.getElementById('kfObjScale').value) || 80;
+  const stageW = stage.offsetWidth;
+  const stageH = stage.offsetHeight;
+
+  // 오브젝트를 스테이지 중앙 하단에 배치
+  const img = document.createElement('img');
+  img.src = `${API}/api/files/${state.imagePath}`;
+  img.className = 'kf-obj';
+  img.style.cssText = `position:absolute;width:${objSize}px;height:${objSize}px;object-fit:contain;`
+    + `left:${(stageW - objSize) / 2}px;top:${stageH - objSize - 20}px;`
+    + `transform-origin:${kfData.transform_origin};z-index:10;`;
+  stage.appendChild(img);
+
+  // 키프레임 애니메이션 적용
+  const waFrames = kfData.keyframes.map(kf => ({
+    offset:    kf.t,
+    transform: `translate(${kf.translateX||0}px, ${kf.translateY||0}px) `
+             + `rotate(${kf.rotate||0}deg) `
+             + `scaleX(${kf.scaleX||1}) scaleY(${kf.scaleY||1})`,
+    opacity:   kf.opacity !== undefined ? kf.opacity : 1,
+  }));
+
+  state.kfAnim = img.animate(waFrames, {
+    duration:   kfData.duration_ms,
+    easing:     kfData.easing === 'spring' ? 'ease-out' : kfData.easing,
+    iterations: kfData.loop ? Infinity : 1,
+    fill:       'forwards',
+  });
+
+  // 스테이지 정보 업데이트
+  document.getElementById('kfStageInfo').textContent =
+    `스테이지: ${stageW}×${stageH} | 오브젝트: ${objSize}px | 위치: 하단 중앙`;
+}
+
+function updateStageSize() {
+  const val = document.getElementById('kfStageSize').value;
+  const [w, h] = val.split('x').map(Number);
+  const stage = document.getElementById('kfStage');
+  stage.style.width = w + 'px';
+  stage.style.height = h + 'px';
+  if (state.currentKfData) _renderKfPreview(state.currentKfData);
+}
+
+function updateStageBg() {
+  const sel = document.getElementById('kfStageBg').value;
+  const stage = document.getElementById('kfStage');
+  const customInput = document.getElementById('kfStageBgCustom');
+
+  const bgMap = {
+    'checker': "repeating-conic-gradient(#1a1e2a 0% 25%,#14171f 0% 50%) 50%/16px 16px",
+    'white':   '#ffffff',
+    'sky':     'linear-gradient(180deg, #87CEEB 0%, #E0F7FF 60%, #98D4A5 100%)',
+    'dark':    '#1a1a2e',
+  };
+
+  if (sel === 'custom') {
+    customInput.style.display = 'inline-block';
+    const path = customInput.value.trim();
+    if (path) {
+      stage.style.background = `url(${API}/api/files/${path}) center/cover`;
+    }
+  } else {
+    customInput.style.display = 'none';
+    stage.style.background = bgMap[sel] || bgMap['checker'];
+  }
+}
+
+function updateObjInStage() {
+  if (state.currentKfData) _renderKfPreview(state.currentKfData);
+}
+
+function applyKfEdits() {
+  const mode = document.getElementById('kfMotionMode').value;
+  const ampScale = parseFloat(document.getElementById('kfSliderAmplitude').value);
+  const duration = parseInt(document.getElementById('kfSliderDuration').value);
+  const targetTX = parseFloat(document.getElementById('kfSliderTX').value);
+  const targetTY = parseFloat(document.getElementById('kfSliderTY').value);
+  const targetRot = parseFloat(document.getElementById('kfSliderRotate').value);
+  const scaleMulti = parseFloat(document.getElementById('kfSliderScale').value);
+
+  let edited;
+
+  if (mode === 'oneway') {
+    // ── 한 방향 이동 모드 ──
+    // 시작 위치에서 목표 위치까지 이동 후 멈춤 (루프 없음)
+    edited = {
+      animation_type: 'oneway',
+      duration_ms: duration,
+      easing: 'ease-out',
+      transform_origin: 'center center',
+      loop: false,
+      keyframes: [
+        { t: 0.0,  translateX: 0, translateY: 0, rotate: 0, scaleX: 1, scaleY: 1, opacity: 1 },
+        { t: 0.15, translateX: targetTX * 0.05, translateY: targetTY * 0.05, rotate: targetRot * 0.05, scaleX: 1, scaleY: 1, opacity: 1 },
+        { t: 0.5,  translateX: targetTX * 0.6,  translateY: targetTY * 0.6,  rotate: targetRot * 0.6,  scaleX: scaleMulti, scaleY: scaleMulti, opacity: 1 },
+        { t: 0.8,  translateX: targetTX * 0.92, translateY: targetTY * 0.92, rotate: targetRot * 0.92, scaleX: scaleMulti, scaleY: scaleMulti, opacity: 1 },
+        { t: 1.0,  translateX: targetTX, translateY: targetTY, rotate: targetRot, scaleX: scaleMulti, scaleY: scaleMulti, opacity: 1 },
+      ],
+    };
+  } else {
+    // ── 진동 모드 (기존) ──
+    const orig = state.originalKfData;
+    edited = JSON.parse(JSON.stringify(orig));
+    edited.duration_ms = duration;
+
+    edited.keyframes = orig.keyframes.map(kf => {
+      const newKf = {...kf};
+      newKf.translateX = (kf.translateX || 0) * ampScale + targetTX;
+      newKf.translateY = (kf.translateY || 0) * ampScale + targetTY;
+      newKf.rotate = (kf.rotate || 0) * ampScale + targetRot;
+      newKf.scaleX = 1.0 + ((kf.scaleX || 1) - 1.0) * ampScale * scaleMulti;
+      newKf.scaleY = 1.0 + ((kf.scaleY || 1) - 1.0) * ampScale * scaleMulti;
+      return newKf;
+    });
+
+    // 마지막 프레임 원점 (루프 이음새)
+    const last = edited.keyframes[edited.keyframes.length - 1];
+    last.translateX = targetTX;
+    last.translateY = targetTY;
+    last.rotate = targetRot;
+    last.scaleX = scaleMulti;
+    last.scaleY = scaleMulti;
+  }
+
+  state.currentKfData = edited;
+  _renderKfPreview(edited);
+  log(`키프레임 수정: mode=${mode} dur=${duration}ms tx=${targetTX} ty=${targetTY} rot=${targetRot}° scale=${scaleMulti}x`);
+}
+
+function resetKfEdits() {
+  if (!state.originalKfData) return;
+  state.currentKfData = JSON.parse(JSON.stringify(state.originalKfData));
+  playKeyframePreview(state.originalKfData);
+  log('키프레임 초기화');
+}
+
+function exportKfJson() {
+  const data = state.currentKfData || state.originalKfData;
+  if (!data) return;
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (state.stem || 'keyframe') + '_edited.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  log('JSON 내보내기: ' + a.download);
+}
+
+// ── Step 2: Generate ─────────────────────────────────────────
+
+function skipToSelect() {
+  log('기존 영상으로 바로 진행');
+  markDone(1);
+  markDone(2);
+  showStep(3);
+}
+
+async function runGenerate() {
+  document.getElementById('btnGenerate').disabled = true;
+  const maxRetries = parseInt(document.getElementById('maxRetries').value) || 7;
+  document.getElementById('genStatus').innerHTML = `<div class="spinner"></div> 생성 중... (0/${maxRetries})`;
+  log(`WAN 모션 생성 시작 (${maxRetries}회)`);
+
+  try {
+    const res = await fetch(`${API}/api/generate`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image_path: state.imagePath, max_retries: maxRetries}),
+    });
+    const data = await res.json();
+    state.jobId = data.job_id;
+    log('Job started: ' + data.job_id);
+
+    // 폴링 — 생성 중에도 완료된 영상을 실시간으로 표시
+    let lastVideoCount = 0;
+    const poll = setInterval(async () => {
+      const sr = await fetch(`${API}/api/status/${state.jobId}`);
+      const sd = await sr.json();
+
+      const vidCount = (sd.videos || []).length;
+      document.getElementById('genStatus').innerHTML =
+        `<div class="spinner"></div> 생성 중... (${sd.elapsed_sec}초, ${vidCount}/${maxRetries}개 영상)`;
+
+      if (vidCount > lastVideoCount) {
+        lastVideoCount = vidCount;
+        state.videos = sd.videos;
+        renderVideoGrid(sd.videos);
+        document.getElementById('panel3').style.display = 'block';
+        log(`영상 ${vidCount}/${maxRetries}개 생성됨`);
+      }
+
+      if (sd.status === 'done') {
+        clearInterval(poll);
+        log('생성 완료 — 총 ' + vidCount + '개 영상');
+        document.getElementById('genStatus').innerHTML =
+          `<span class="badge badge-kf">완료 (${vidCount}개)</span>`;
+        markDone(2);
+        state.videos = sd.videos;
+        renderVideoGrid(sd.videos);
+        loadStats();  // 통계 로드
+        showStep(3);
+      } else if (sd.status === 'error') {
+        clearInterval(poll);
+        log('생성 실패: ' + sd.error);
+        document.getElementById('genStatus').innerHTML = `<span class="badge badge-err">${sd.error}</span>`;
+        document.getElementById('btnGenerate').disabled = false;
+        loadStats();  // 실패해도 통계는 표시
+      }
+    }, 5000);
+  } catch (e) {
+    log('Error: ' + e.message);
+    document.getElementById('btnGenerate').disabled = false;
+  }
+}
+
+// ── Step 3: Video selection ──────────────────────────────────
+
+let currentVideoTab = 'current';
+
+async function loadVideos() {
+  const res = await fetch(`${API}/api/videos/${state.stem}`);
+  const data = await res.json();
+  state.videos = data.videos;
+  renderVideoGrid(data.videos);
+}
+
+async function loadAllVideos() {
+  const res = await fetch(`${API}/api/videos_all`);
+  const data = await res.json();
+  state.videos = data.videos;
+  renderVideoGrid(data.videos);
+  log(`전체 영상 ${data.total}개 로드`);
+}
+
+function switchVideoTab(tab) {
+  currentVideoTab = tab;
+  state.selectedVideo = null;
+  document.getElementById('btnSelect').disabled = true;
+
+  const tabCurrent = document.getElementById('tabCurrent');
+  const tabAll = document.getElementById('tabAll');
+  const desc = document.getElementById('videoTabDesc');
+
+  if (tab === 'current') {
+    tabCurrent.style.borderBottomColor = 'var(--accent)';
+    tabCurrent.style.color = 'var(--accent)';
+    tabAll.style.borderBottomColor = 'transparent';
+    tabAll.style.color = 'var(--mid)';
+    desc.textContent = '현재 이미지에서 생성된 영상입니다.';
+    loadVideos();
+  } else {
+    tabAll.style.borderBottomColor = 'var(--accent)';
+    tabAll.style.color = 'var(--accent)';
+    tabCurrent.style.borderBottomColor = 'transparent';
+    tabCurrent.style.color = 'var(--mid)';
+    desc.textContent = 'motion/ 폴더의 모든 영상입니다. 다른 이미지의 영상도 선택하여 배경 제거 + Lottie + Stage 2로 진행할 수 있습니다.';
+    loadAllVideos();
+  }
+}
+
+function renderVideoGrid(videos) {
+  const grid = document.getElementById('videoGrid');
+  grid.innerHTML = '';
+  videos.forEach((v, i) => {
+    const div = document.createElement('div');
+    div.className = 'video-card';
+    div.onclick = () => selectVideo(i);
+    div.innerHTML = `
+      <video src="${API}/api/files/${v.path}" loop muted playsinline preload="auto"
+             onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"></video>
+      <div class="meta">${v.filename} (${v.size_mb}MB)</div>`;
+    grid.appendChild(div);
+  });
+}
+
+function selectVideo(idx) {
+  state.selectedVideo = state.videos[idx];
+  document.querySelectorAll('.video-card').forEach((c,i) => {
+    c.classList.toggle('selected', i === idx);
+  });
+  document.getElementById('btnSelect').disabled = false;
+  log('선택: ' + state.selectedVideo.filename);
+}
+
+// ── Step 4: BG remove + Lottie ───────────────────────────────
+
+async function runSelectVideo() {
+  if (!state.selectedVideo) return;
+  document.getElementById('btnSelect').disabled = true;
+  showStep(4);
+  document.getElementById('lottieStatus').innerHTML = '<div class="spinner"></div> 배경 제거 + Lottie 변환 중...';
+  log('배경 제거 시작: ' + state.selectedVideo.filename);
+
+  try {
+    const res = await fetch(`${API}/api/select_video`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        video_path: state.selectedVideo.path,
+        preset: 'web',
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    state.lottieData = data;
+    log('Lottie 변환 완료: ' + data.lottie_info.file_size_mb.toFixed(1) + 'MB');
+    document.getElementById('lottieStatus').innerHTML = '<span class="badge badge-kf">완료</span>';
+
+    // Lottie info
+    const info = data.lottie_info;
+    document.getElementById('lottieInfo').innerHTML = `
+      <dl class="classify-result" style="margin-top:12px">
+        <dt>fps</dt><dd>${info.fps}</dd>
+        <dt>frames</dt><dd>${info.frame_count}</dd>
+        <dt>duration</dt><dd>${info.duration_ms}ms</dd>
+        <dt>size</dt><dd>${info.width}×${info.height}</dd>
+        <dt>file</dt><dd>${info.file_size_mb.toFixed(1)}MB</dd>
+      </dl>`;
+
+    // Lottie 재생
+    const previewEl = document.getElementById('lottiePreview');
+    previewEl.style.display = 'flex';
+    previewEl.innerHTML = '';
+    try {
+      const lottieRes = await fetch(`${API}/api/files/${data.lottie_path}`);
+      const lottieJson = await lottieRes.json();
+      state.lottieAnim = bodymovin.loadAnimation({
+        container: previewEl,
+        renderer: 'svg',
+        loop: true,
+        autoplay: true,
+        animationData: lottieJson,
+      });
+    } catch (le) {
+      previewEl.innerHTML = `<span class="badge badge-warn">Lottie 미리보기 실패</span>`;
+      log('Lottie 미리보기 실패: ' + le.message);
+    }
+
+    markDone(3);
+    markDone(4);
+    document.getElementById('btnStage2').disabled = false;
+  } catch (e) {
+    log('Error: ' + e.message);
+    document.getElementById('lottieStatus').innerHTML = `<span class="badge badge-err">${e.message}</span>`;
+  }
+}
+
+// ── Stats: 통계 그래프 ───────────────────────────────────────
+
+let statsChartInstance = null;
+
+async function loadStats() {
+  try {
+    const res = await fetch(`${API}/api/stats/${state.stem}`);
+    const data = await res.json();
+    if (data.error || data.total === 0) return;
+
+    document.getElementById('statsCard').style.display = 'block';
+
+    // 요약
+    document.getElementById('statsSummary').innerHTML =
+      `총 <b>${data.total}</b>회 시도 · ` +
+      `<span style="color:var(--green)">성공 ${data.success}</span> · ` +
+      `<span style="color:var(--red)">실패 ${data.fail}</span> · ` +
+      `성공률 <b>${data.success_rate}%</b>`;
+
+    // attempt별 결과 차트 (막대)
+    const ctx = document.getElementById('statsChart').getContext('2d');
+    if (statsChartInstance) statsChartInstance.destroy();
+
+    const labels = data.attempts.map(a => `#${a.attempt}`);
+    const colors = data.attempts.map(a =>
+      a.result === 'success' ? 'rgba(52,211,153,0.8)' : 'rgba(248,113,113,0.7)');
+    const borderColors = data.attempts.map(a =>
+      a.result === 'success' ? '#34d399' : '#f87171');
+
+    statsChartInstance = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'VRAM (MB)',
+          data: data.attempts.map(a => a.vram_mb || 0),
+          backgroundColor: colors,
+          borderColor: borderColors,
+          borderWidth: 1,
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              afterLabel: function(ctx) {
+                const a = data.attempts[ctx.dataIndex];
+                let lines = [a.result.toUpperCase()];
+                if (a.issues.length) lines.push('Issues: ' + a.issues.join(', '));
+                if (a.remedy) lines.push('Remedy: ' + a.remedy);
+                return lines;
+              }
+            }
+          }
+        },
+        scales: {
+          x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#6878a0', font: { size: 10 } } },
+          y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#6878a0', font: { size: 10 } },
+               title: { display: true, text: 'VRAM (MB)', color: '#6878a0', font: { size: 10 } } }
+        }
+      }
+    });
+
+    // 이슈 분포 (도넛 표시)
+    const issueCounts = data.issue_counts;
+    const issueKeys = Object.keys(issueCounts);
+    if (issueKeys.length > 0) {
+      const issueColors = ['#f87171','#fbbf24','#a78bfa','#fb923c','#38bdf8','#34d399','#f472b6','#818cf8'];
+      document.getElementById('statsIssues').innerHTML = `
+        <div style="font-size:11px;color:var(--mid);margin-bottom:6px">실패 이슈 분포</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${issueKeys.map((k, i) =>
+            `<span class="badge" style="background:${issueColors[i % issueColors.length]}22;color:${issueColors[i % issueColors.length]}">${k}: ${issueCounts[k]}</span>`
+          ).join('')}
+        </div>`;
+    }
+  } catch (e) {
+    log('통계 로드 실패: ' + e.message);
+  }
+}
+
+// ── Step 5: Stage 2 ──────────────────────────────────────────
+
+async function runStage2() {
+  document.getElementById('btnStage2').disabled = true;
+  document.getElementById('stage2Result').innerHTML = '<div class="spinner"></div>';
+  log('Stage 2 키프레임 판단 시작');
+
+  try {
+    const res = await fetch(`${API}/api/classify_motion`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({video_path: state.selectedVideo.path}),
+    });
+    const data = await res.json();
+
+    const isAmplify = (data.travel_type || '').startsWith('amplify_');
+    const badge = data.needs_keyframe
+      ? (isAmplify
+          ? `<span class="badge badge-motion">모션 증폭 필요 (${data.suggested_keyframe})</span>`
+          : '<span class="badge badge-motion">키프레임 이동 필요</span>')
+      : '<span class="badge badge-kf">제자리 모션 (보강 불필요)</span>';
+
+    document.getElementById('stage2Result').innerHTML = `
+      ${badge}
+      <dl class="classify-result" style="margin-top:10px">
+        <dt>needs_kf</dt><dd>${data.needs_keyframe}</dd>
+        <dt>type</dt><dd>${data.travel_type}</dd>
+        <dt>direction</dt><dd>${data.travel_direction}</dd>
+        <dt>confidence</dt><dd>${(data.confidence * 100).toFixed(0)}%</dd>
+        <dt>suggested</dt><dd>${data.suggested_keyframe || '—'}</dd>
+        <dt>reason</dt><dd>${data.reason}</dd>
+      </dl>`;
+
+    log('Stage 2 결과: ' + data.travel_type + (data.suggested_keyframe ? ' → ' + data.suggested_keyframe : ''));
+    markDone(5);
+  } catch (e) {
+    log('Error: ' + e.message);
+    document.getElementById('stage2Result').innerHTML = `<span class="badge badge-err">${e.message}</span>`;
+    document.getElementById('btnStage2').disabled = false;
+  }
+}
+</script>
+</body>
+</html>

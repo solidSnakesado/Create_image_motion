@@ -52,6 +52,9 @@ from .wan_vision_analyzer import WanVisionAnalyzer, VisionAnalysisResult
 from .wan_ai_validator import WanAIValidator, AIValidationResult
 from .wan_bg_remover import WanBgRemover
 from .wan_mask_generator import WanMaskGenerator
+from .wan_mode_classifier import WanModeClassifier, ProcessingMode, ModeClassification
+from .wan_post_motion_classifier import WanPostMotionClassifier, PostMotionResult
+from .wan_keyframe_generator import WanKeyframeGenerator, KeyframeAnimConfig
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────
 
 MAX_RETRIES = 7
+ATTEMPT_OFFSET = 0   # 서버에서 기존 영상 수만큼 오프셋 설정
 
 COMFYUI_URL   = os.environ.get("COMFYUI_URL",   "http://127.0.0.1:8188")
 WAN_MODEL     = os.environ.get("WAN_MODEL",     "wan2.1-i2v-14b-480p-Q3_K_S.gguf")
@@ -98,26 +102,44 @@ class WanResult:
     """WAN 생성 최종 결과."""
     def __init__(
         self,
-        success:      bool,
-        video_path:   str | None     = None,
-        analysis:     VisionAnalysisResult | None = None,
-        validation:   ValidationResult | None     = None,
-        attempts:     int  = 0,
-        seed:         int  = 0,
+        success:         bool,
+        video_path:      str | None     = None,
+        analysis:        VisionAnalysisResult | None = None,
+        validation:      ValidationResult | None     = None,
+        attempts:        int  = 0,
+        seed:            int  = 0,
+        mode:            ModeClassification | None = None,
+        post_motion:     PostMotionResult | None   = None,
+        keyframe_config: KeyframeAnimConfig | None = None,
     ):
-        self.success    = success
-        self.video_path = video_path
-        self.analysis   = analysis
-        self.validation = validation
-        self.attempts   = attempts
-        self.seed       = seed
+        self.success         = success
+        self.video_path      = video_path
+        self.analysis        = analysis
+        self.validation      = validation
+        self.attempts        = attempts
+        self.seed            = seed
+        self.mode            = mode
+        self.post_motion     = post_motion
+        self.keyframe_config = keyframe_config
 
     def __str__(self) -> str:
+        if self.mode and self.mode.processing_mode == ProcessingMode.KEYFRAME_ONLY:
+            kf_info = ""
+            if self.keyframe_config:
+                kf_info = f", kf={self.keyframe_config.animation_type}/{self.keyframe_config.duration_ms}ms"
+            return (
+                f"✅ WanResult(mode=KEYFRAME_ONLY, "
+                f"facing={self.mode.facing_direction.value}, "
+                f"action={self.mode.suggested_action}{kf_info})"
+            )
         if self.success:
+            pm = ""
+            if self.post_motion and self.post_motion.needs_keyframe:
+                pm = f", travel={self.post_motion.travel_direction.value}"
             return (
                 f"✅ WanResult(video={self.video_path}, "
-                f"action={self.analysis.action_desc}, "   # action_type → action_desc
-                f"attempts={self.attempts}, seed={self.seed})"
+                f"action={self.analysis.action_desc}, "
+                f"attempts={self.attempts}{pm})"
             )
         return f"❌ WanResult(failed after {self.attempts} attempts)"
 
@@ -1595,9 +1617,17 @@ class WanBackend:
         self.ai_validator  = WanAIValidator(api_key=api_key)
         self.bg_remover    = WanBgRemover()
         self.mask_gen      = WanMaskGenerator()
+        self.mode_classifier = WanModeClassifier(api_key=api_key)
+        self.post_motion_classifier = WanPostMotionClassifier(api_key=api_key)
+        self.keyframe_generator = WanKeyframeGenerator()
         self.comfyui       = ComfyUIClient(base_url=comfyui_url)
         self.output_dir   = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        # 출력 하위 디렉토리 분리
+        self.dir_motion          = os.path.join(output_dir, "motion")
+        self.dir_keyframe_only   = os.path.join(output_dir, "keyframe_only")
+        self.dir_motion_keyframe = os.path.join(output_dir, "motion_keyframe")
+        for d in [output_dir, self.dir_motion, self.dir_keyframe_only, self.dir_motion_keyframe]:
+            os.makedirs(d, exist_ok=True)
 
         # ── 검증 실패 통계 추적기 ──────────────────────────────
         self._stats = _ValidationStats(output_dir=output_dir)
@@ -1630,10 +1660,54 @@ class WanBackend:
         Returns:
             WanResult
         """
-        out_dir = output_dir or self.output_dir
-        os.makedirs(out_dir, exist_ok=True)
-
         stem = Path(image_path).stem
+
+        # ── Stage 1: 처리 모드 분류 ─────────────────────────
+        # 이미지를 분석하여 WAN이 필요한지 사전 판단
+        # KEYFRAME_ONLY → WAN 생성 건너뜀 (GPU 비용 절감)
+        # MOTION_NEEDED → WAN 생성 진행 → Stage 2에서 키프레임 여부 재판단
+        logger.info(f"\n{'═'*55}")
+        logger.info(f"  [WanBackend] 시작: {stem}")
+        logger.info(f"{'═'*55}")
+
+        mode = self.mode_classifier.classify(image_path)
+        logger.info(f"  [Stage1] mode={mode.processing_mode.value} "
+                    f"facing={mode.facing_direction.value} "
+                    f"scene={mode.is_scene} "
+                    f"action={mode.suggested_action}")
+
+        if mode.processing_mode == ProcessingMode.KEYFRAME_ONLY:
+            # 키프레임 생성 → keyframe_only/ 폴더에 저장
+            kf_config = self.keyframe_generator.generate(
+                suggested_action = mode.suggested_action,
+                facing_direction = mode.facing_direction.value,
+            )
+            kf_path = os.path.join(self.dir_keyframe_only, f"{stem}_keyframe.json")
+            kf_config.to_json(kf_path)
+
+            logger.info(
+                f"\n  ✅ KEYFRAME_ONLY 판정 → WAN 생성 건너뜀\n"
+                f"  → subject: {mode.subject_desc}\n"
+                f"  → facing:  {mode.facing_direction.value}\n"
+                f"  → action:  {mode.suggested_action}\n"
+                f"  → keyframe: {kf_config.animation_type} "
+                f"{kf_config.duration_ms}ms {len(kf_config.keyframes)}kf\n"
+                f"  → saved:   {kf_path}\n"
+                f"  → reason:  {mode.reason}\n"
+                f"{'═'*55}"
+            )
+            return WanResult(
+                success         = True,
+                mode            = mode,
+                keyframe_config = kf_config,
+            )
+
+        # MOTION_NEEDED → WAN 생성 진행
+        logger.info(f"  → MOTION_NEEDED: WAN 모션 생성 진행 (Stage 2에서 키프레임 여부 재판단)")
+
+        # 모션 출력은 motion/ 하위 폴더에 저장
+        out_dir = output_dir or self.dir_motion
+        os.makedirs(out_dir, exist_ok=True)
 
         # ── Step 0: 이미지 전처리 (480×480 패딩) ─────────────
         # WAN 입력 / 마스크 / 후처리 합성이 동일 좌표계를 공유하도록 강제
@@ -1642,9 +1716,6 @@ class WanBackend:
         image_path = processed_path  # 이후 모든 로직은 480×480 기준
 
         # ── Step 1: LLM Vision 분석 ──────────────────────────
-        logger.info(f"\n{'═'*55}")
-        logger.info(f"  [WanBackend] 시작: {stem}")
-        logger.info(f"{'═'*55}")
 
         analysis = self.analyzer.analyze(image_path)  # processed 기준으로 분석
 
@@ -1881,6 +1952,8 @@ class WanBackend:
                         logger.info(f"  → 배경 제거 스킵 (bg_type={analysis.bg_type})")
 
                     # 성공 결과 저장 후 루프 계속 (MAX_RETRIES 전부 소진)
+                    # Stage 2(키프레임 이동 판단)는 사용자가 영상 확인 후
+                    # classify_post_motion() 수동 호출로 진행
                     result = WanResult(
                         success    = True,
                         video_path = video_path,
@@ -1888,6 +1961,7 @@ class WanBackend:
                         validation = validation,
                         attempts   = attempt,
                         seed       = seed,
+                        mode       = mode,
                     )
                     successful_results.append(result)
                     logger.info(
@@ -2145,6 +2219,7 @@ class WanBackend:
             success  = False,
             analysis = analysis,
             attempts = MAX_RETRIES,
+            mode     = mode,
         )
 
     def _adjust_params(
@@ -2187,6 +2262,92 @@ class WanBackend:
             logger.info(f"  [조정] repeated_motion → 시드 재시도")
 
         return fps, scale
+
+    # ──────────────────────────────────────────────────────────
+    # Stage 2: 모션 생성 후 키프레임 이동 판단 (수동 호출)
+    # ──────────────────────────────────────────────────────────
+
+    def classify_post_motion(
+        self,
+        video_path:    str,
+        image_path:    str | None = None,
+    ) -> "PostMotionResult":
+        """
+        [Stage 2] 생성된 영상을 분석하여 키프레임 이동이 필요한지 판단.
+
+        WAN 생성 완료 후, 사용자가 영상을 확인하고 원하는 영상을 지정하여 호출.
+        generate() 내부에서는 자동 호출되지 않음.
+
+        Args:
+            video_path  : 분석할 MP4 영상 경로
+                          (예: "outputs/wan/bird_attempt03.mp4")
+            image_path  : 원본 이미지 경로 (없으면 processed 이미지 자동 추론)
+
+        Returns:
+            PostMotionResult:
+                needs_keyframe   : bool  — 키프레임 이동 필요 여부
+                travel_type      : str   — no_travel / travel_lateral / travel_vertical / travel_diagonal
+                travel_direction : str   — left / right / up / down / none
+                confidence       : float — 판단 확신도 (0.0~1.0)
+                reason           : str   — 판단 근거
+
+        사용법:
+            # 1. WAN 생성
+            result = backend.generate("frog.png")
+
+            # 2. outputs/wan/ 에서 생성된 영상 확인 (attempt01~07.mp4)
+
+            # 3. 원하는 영상으로 Stage 2 호출
+            pm = backend.classify_post_motion("outputs/wan/frog_attempt03.mp4")
+
+            if pm.needs_keyframe:
+                print(f"이동 필요: {pm.travel_direction.value} 방향")
+            else:
+                print("제자리 모션 — 키프레임 이동 불필요")
+        """
+        logger.info(f"\n{'═'*55}")
+        logger.info(f"  [Stage2] 수동 모션 분석 시작")
+        logger.info(f"  → 영상: {video_path}")
+        logger.info(f"{'═'*55}")
+
+        # 원본 이미지 경로 추론
+        if image_path is None:
+            stem = Path(video_path).stem
+            # attempt 번호 제거: bird_attempt03 → bird
+            base_stem = re.sub(r'_attempt\d+$', '', stem)
+            candidate = os.path.join(
+                os.path.dirname(video_path),
+                f"{base_stem}_processed.png",
+            )
+            if os.path.exists(candidate):
+                image_path = candidate
+                logger.info(f"  → 원본 이미지 자동 추론: {image_path}")
+            else:
+                logger.warning(f"  ⚠ 원본 이미지 추론 실패: {candidate}")
+
+        result = self.post_motion_classifier.classify(
+            video_path    = video_path,
+            original_path = image_path or video_path,
+        )
+
+        if result.needs_keyframe:
+            logger.info(
+                f"\n  ✅ 키프레임 이동 필요\n"
+                f"  → type:      {result.travel_type.value}\n"
+                f"  → direction: {result.travel_direction.value}\n"
+                f"  → confidence:{result.confidence:.2f}\n"
+                f"  → reason:    {result.reason}\n"
+                f"{'═'*55}"
+            )
+        else:
+            logger.info(
+                f"\n  ℹ 키프레임 이동 불필요 (제자리 모션)\n"
+                f"  → confidence:{result.confidence:.2f}\n"
+                f"  → reason:    {result.reason}\n"
+                f"{'═'*55}"
+            )
+
+        return result
 
     # ──────────────────────────────────────────────────────────
     # 수동 선택 영상 최종 처리
@@ -2346,9 +2507,10 @@ class WanBackend:
         # 완료 대기
         history = self.comfyui.wait_for_completion(prompt_id)
 
-        # 비디오 다운로드
+        # 비디오 다운로드 (ATTEMPT_OFFSET으로 기존 영상 번호 이후부터)
+        actual_num = attempt + ATTEMPT_OFFSET
         video_path = os.path.join(
             out_dir,
-            f"{stem}_attempt{attempt:02d}.mp4",
+            f"{stem}_attempt{actual_num:02d}.mp4",
         )
         return self.comfyui.download_video(history, video_path)
