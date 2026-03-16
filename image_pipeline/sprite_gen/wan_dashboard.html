@@ -219,7 +219,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--sa
           </select>
           <span></span>
 
-          <label style="color:var(--mid)">진폭 (amplitude)</label>
+          <label style="color:var(--mid)">움직임 크기</label>
           <input type="range" id="kfSliderAmplitude" min="0.1" max="10.0" step="0.1" value="1.0">
           <span id="kfValAmplitude" style="font-family:var(--mono);color:var(--txt)">1.0x</span>
 
@@ -227,11 +227,11 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--sa
           <input type="range" id="kfSliderDuration" min="200" max="5000" step="50" value="1000">
           <span id="kfValDuration" style="font-family:var(--mono);color:var(--txt)">1000ms</span>
 
-          <label style="color:var(--mid)">이동X (px)</label>
+          <label style="color:var(--mid)">시작위치 X</label>
           <input type="range" id="kfSliderTX" min="-500" max="500" step="5" value="0">
           <span id="kfValTX" style="font-family:var(--mono);color:var(--txt)">0px</span>
 
-          <label style="color:var(--mid)">이동Y (px)</label>
+          <label style="color:var(--mid)">시작위치 Y</label>
           <input type="range" id="kfSliderTY" min="-500" max="500" step="5" value="0">
           <span id="kfValTY" style="font-family:var(--mono);color:var(--txt)">0px</span>
 
@@ -259,6 +259,26 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--sa
   <div id="panel2" class="panel" style="display:none">
     <div class="card">
       <div class="card-title"><div class="dot" style="background:var(--yellow)"></div>모션 생성</div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:12px">
+        <label style="font-size:12px;color:var(--mid);white-space:nowrap">모델</label>
+        <select id="wanModel" style="background:var(--surf);border:1px solid var(--bdr);color:var(--txt);padding:4px 8px;border-radius:4px;font-size:11px;max-width:320px">
+          <optgroup label="WAN 2.1 I2V 14B (480P)">
+            <option value="wan2.1-i2v-14b-480p-Q3_K_S.gguf" selected>Q3_K_S (6.5GB) — 현재</option>
+            <option value="wan2.1-i2v-14b-480p-Q4_K_S.gguf">Q4_K_S (8.75GB)</option>
+            <option value="wan2.1-i2v-14b-480p-Q4_K_M.gguf">Q4_K_M (9.65GB)</option>
+            <option value="wan2.1-i2v-14b-480p-Q5_K_S.gguf">Q5_K_S (10.1GB)</option>
+          </optgroup>
+          <optgroup label="WAN 2.2 I2V A14B (MoE)">
+            <option value="wan2.2-i2v-a14b-Q3_K_S.gguf">Q3_K_S (6.5GB)</option>
+            <option value="wan2.2-i2v-a14b-Q4_K_S.gguf">Q4_K_S (8.75GB)</option>
+            <option value="wan2.2-i2v-a14b-Q4_K_M.gguf">Q4_K_M (9.65GB)</option>
+          </optgroup>
+          <optgroup label="WAN 2.2 TI2V 5B (경량)">
+            <option value="wan2.2-ti2v-5b-Q5_K_S.gguf">Q5_K_S (3.6GB)</option>
+            <option value="wan2.2-ti2v-5b-Q8_0.gguf">Q8_0 (5.4GB)</option>
+          </optgroup>
+        </select>
+      </div>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
         <label style="font-size:12px;color:var(--mid);white-space:nowrap">생성 횟수</label>
         <input id="maxRetries" type="number" min="1" max="20" value="7" class="sb-input" style="width:70px">
@@ -586,24 +606,65 @@ function playKeyframePreview(kfData) {
 
 function _renderKfPreview(kfData) {
   const stage = document.getElementById('kfStage');
-  // 기존 오브젝트 제거 (배경은 유지)
-  const existing = stage.querySelector('.kf-obj');
+  // 기존 오브젝트 및 Lottie 컨테이너 제거
+  const existing = stage.querySelector('.kf-obj-wrap');
   if (existing) existing.remove();
+  const existingImg = stage.querySelector('.kf-obj');
+  if (existingImg) existingImg.remove();
 
   const objSize = parseInt(document.getElementById('kfObjScale').value) || 80;
   const stageW = stage.offsetWidth;
   const stageH = stage.offsetHeight;
 
-  // 오브젝트를 스테이지 중앙 하단에 배치
-  const img = document.createElement('img');
-  img.src = `${API}/api/files/${state.imagePath}`;
-  img.className = 'kf-obj';
-  img.style.cssText = `position:absolute;width:${objSize}px;height:${objSize}px;object-fit:contain;`
+  // 래퍼 div: CSS 키프레임이 이 래퍼에 적용됨
+  const wrap = document.createElement('div');
+  wrap.className = 'kf-obj-wrap';
+  wrap.style.cssText = `position:absolute;width:${objSize}px;height:${objSize}px;`
     + `left:${(stageW - objSize) / 2}px;top:${stageH - objSize - 20}px;`
     + `transform-origin:${kfData.transform_origin};z-index:10;`;
-  stage.appendChild(img);
 
-  // 키프레임 애니메이션 적용
+  // Lottie 데이터가 있으면 Lottie 애니메이션으로, 없으면 정적 이미지로
+  let hasLottie = false;
+  if (state.lottieData && state.lottieData.lottie_path) {
+    // Lottie 컨테이너
+    const lottieDiv = document.createElement('div');
+    lottieDiv.style.cssText = 'width:100%;height:100%;';
+    wrap.appendChild(lottieDiv);
+
+    // Lottie 로드 (비동기)
+    fetch(`${API}/api/files/${state.lottieData.lottie_path}`)
+      .then(r => r.json())
+      .then(lottieJson => {
+        if (state.kfLottieAnim) { state.kfLottieAnim.destroy(); }
+        state.kfLottieAnim = bodymovin.loadAnimation({
+          container: lottieDiv,
+          renderer: 'svg',
+          loop: true,
+          autoplay: true,
+          animationData: lottieJson,
+        });
+      })
+      .catch(() => {
+        // Lottie 실패 시 정적 이미지 fallback
+        lottieDiv.innerHTML = `<img src="${_getObjImgSrc()}" style="width:100%;height:100%;object-fit:contain">`;
+      });
+    hasLottie = true;
+  } else {
+    // 정적 이미지
+    const img = document.createElement('img');
+    img.src = _getObjImgSrc();
+    img.style.cssText = 'width:100%;height:100%;object-fit:contain;';
+    img.onerror = function() {
+      if (state.imagePath && this.src.indexOf(state.imagePath) === -1) {
+        this.src = `${API}/api/files/${state.imagePath}`;
+      }
+    };
+    wrap.appendChild(img);
+  }
+
+  stage.appendChild(wrap);
+
+  // CSS 키프레임 애니메이션을 래퍼에 적용
   const waFrames = kfData.keyframes.map(kf => ({
     offset:    kf.t,
     transform: `translate(${kf.translateX||0}px, ${kf.translateY||0}px) `
@@ -612,16 +673,31 @@ function _renderKfPreview(kfData) {
     opacity:   kf.opacity !== undefined ? kf.opacity : 1,
   }));
 
-  state.kfAnim = img.animate(waFrames, {
+  state.kfAnim = wrap.animate(waFrames, {
     duration:   kfData.duration_ms,
     easing:     kfData.easing === 'spring' ? 'ease-out' : kfData.easing,
     iterations: kfData.loop ? Infinity : 1,
     fill:       'forwards',
   });
 
-  // 스테이지 정보 업데이트
+  // 정보 표시
+  const syncLabel = hasLottie ? 'Lottie + 키프레임 동기화' : '키프레임만';
   document.getElementById('kfStageInfo').textContent =
-    `스테이지: ${stageW}×${stageH} | 오브젝트: ${objSize}px | 위치: 하단 중앙`;
+    `스테이지: ${stageW}×${stageH} | 오브젝트: ${objSize}px | ${syncLabel}`;
+}
+
+function _getObjImgSrc() {
+  if (state.lottieData && state.lottieData.transparent_dir) {
+    const stem = state.selectedVideo ? state.selectedVideo.filename.replace('.mp4','') : '';
+    return `${API}/api/files/${state.lottieData.transparent_dir}/${stem}_frame_0000.png`;
+  }
+  if (state.imagePath) {
+    return `${API}/api/files/${state.imagePath}`;
+  }
+  if (state.selectedVideo) {
+    return `${API}/api/video_thumb/${encodeURIComponent(state.selectedVideo.path)}`;
+  }
+  return '';
 }
 
 function updateStageSize() {
@@ -665,8 +741,8 @@ function applyKfEdits() {
   const mode = document.getElementById('kfMotionMode').value;
   const ampScale = parseFloat(document.getElementById('kfSliderAmplitude').value);
   const duration = parseInt(document.getElementById('kfSliderDuration').value);
-  const targetTX = parseFloat(document.getElementById('kfSliderTX').value);
-  const targetTY = parseFloat(document.getElementById('kfSliderTY').value);
+  const offsetTX = parseFloat(document.getElementById('kfSliderTX').value);
+  const offsetTY = parseFloat(document.getElementById('kfSliderTY').value);
   const targetRot = parseFloat(document.getElementById('kfSliderRotate').value);
   const scaleMulti = parseFloat(document.getElementById('kfSliderScale').value);
 
@@ -674,7 +750,8 @@ function applyKfEdits() {
 
   if (mode === 'oneway') {
     // ── 한 방향 이동 모드 ──
-    // 시작 위치에서 목표 위치까지 이동 후 멈춤 (루프 없음)
+    const targetTX = parseFloat(document.getElementById('kfSliderTX').value);
+    const targetTY = parseFloat(document.getElementById('kfSliderTY').value);
     edited = {
       animation_type: 'oneway',
       duration_ms: duration,
@@ -690,15 +767,18 @@ function applyKfEdits() {
       ],
     };
   } else {
-    // ── 진동 모드 (기존) ──
+    // ── 진동 모드 ──
+    // amplitude: 원본 움직임의 크기를 배율로 조절 (hop이면 점프 높이)
+    // 시작위치 X/Y: 전체 키프레임에 고정 오프셋 추가 (시작 지점 이동)
     const orig = state.originalKfData;
     edited = JSON.parse(JSON.stringify(orig));
     edited.duration_ms = duration;
 
-    edited.keyframes = orig.keyframes.map(kf => {
+    edited.keyframes = orig.keyframes.map((kf, idx) => {
       const newKf = {...kf};
-      newKf.translateX = (kf.translateX || 0) * ampScale + targetTX;
-      newKf.translateY = (kf.translateY || 0) * ampScale + targetTY;
+      // 원본 움직임 * amplitude (점프 높이, 흔들림 크기 등 직접 조절)
+      newKf.translateX = (kf.translateX || 0) * ampScale;
+      newKf.translateY = (kf.translateY || 0) * ampScale;
       newKf.rotate = (kf.rotate || 0) * ampScale + targetRot;
       newKf.scaleX = 1.0 + ((kf.scaleX || 1) - 1.0) * ampScale * scaleMulti;
       newKf.scaleY = 1.0 + ((kf.scaleY || 1) - 1.0) * ampScale * scaleMulti;
@@ -707,16 +787,52 @@ function applyKfEdits() {
 
     // 마지막 프레임 원점 (루프 이음새)
     const last = edited.keyframes[edited.keyframes.length - 1];
-    last.translateX = targetTX;
-    last.translateY = targetTY;
-    last.rotate = targetRot;
-    last.scaleX = scaleMulti;
-    last.scaleY = scaleMulti;
+    last.translateX = 0;
+    last.translateY = 0;
+    last.rotate = 0;
+    last.scaleX = 1;
+    last.scaleY = 1;
   }
 
   state.currentKfData = edited;
-  _renderKfPreview(edited);
-  log(`키프레임 수정: mode=${mode} dur=${duration}ms tx=${targetTX} ty=${targetTY} rot=${targetRot}° scale=${scaleMulti}x`);
+
+  // 기존 래퍼가 있으면 애니메이션만 교체 (Lottie 재로드 방지)
+  const stage = document.getElementById('kfStage');
+  const wrap = stage.querySelector('.kf-obj-wrap');
+
+  if (wrap) {
+    // 시작 위치 오프셋 적용
+    const objSize = parseInt(document.getElementById('kfObjScale').value) || 80;
+    const baseLeft = (stage.offsetWidth - objSize) / 2;
+    const baseTop = stage.offsetHeight - objSize - 20;
+    wrap.style.left = (baseLeft + offsetTX) + 'px';
+    wrap.style.top = (baseTop + offsetTY) + 'px';
+
+    // 기존 CSS 애니메이션 취소 후 새로 적용
+    if (state.kfAnim) state.kfAnim.cancel();
+
+    const waFrames = edited.keyframes.map(kf => ({
+      offset:    kf.t,
+      transform: `translate(${kf.translateX||0}px, ${kf.translateY||0}px) `
+               + `rotate(${kf.rotate||0}deg) `
+               + `scaleX(${kf.scaleX||1}) scaleY(${kf.scaleY||1})`,
+      opacity:   kf.opacity !== undefined ? kf.opacity : 1,
+    }));
+
+    state.kfAnim = wrap.animate(waFrames, {
+      duration:   edited.duration_ms,
+      easing:     edited.easing === 'spring' ? 'ease-out' : (edited.easing || 'ease-in-out'),
+      iterations: edited.loop ? Infinity : 1,
+      fill:       'forwards',
+    });
+  } else {
+    // 래퍼가 없으면 처음부터 생성
+    _renderKfPreview(edited);
+  }
+
+  const origMax = state.originalKfData ? Math.max(...state.originalKfData.keyframes.map(k => Math.abs(k.translateY||0))) : 0;
+  const newMax = Math.round(origMax * ampScale);
+  log(`키프레임 수정: 움직임=${ampScale}x (높이 ${origMax}→${newMax}px) dur=${duration}ms 시작위치=(${offsetTX},${offsetTY})`);
 }
 
 function resetKfEdits() {
@@ -758,7 +874,11 @@ async function runGenerate() {
     const res = await fetch(`${API}/api/generate`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({image_path: state.imagePath, max_retries: maxRetries}),
+      body: JSON.stringify({
+        image_path: state.imagePath,
+        max_retries: maxRetries,
+        model_name: document.getElementById('wanModel').value,
+      }),
     });
     const data = await res.json();
     state.jobId = data.job_id;
@@ -1059,6 +1179,42 @@ async function runStage2() {
 
     log('Stage 2 결과: ' + data.travel_type + (data.suggested_keyframe ? ' → ' + data.suggested_keyframe : ''));
     markDone(5);
+
+    // needs_keyframe=true → 키프레임 자동 생성 + 편집 UI 표시
+    if (data.needs_keyframe && data.suggested_keyframe) {
+      try {
+        const kfRes = await fetch(`${API}/api/generate_keyframe`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            suggested_action: data.suggested_keyframe,
+            facing_direction: data.travel_direction || 'none',
+          }),
+        });
+        const kfData = await kfRes.json();
+        if (kfData.keyframes) {
+          // 키프레임 편집 카드 표시 (Step 1의 kfResultCard 재활용)
+          document.getElementById('kfResultCard').style.display = 'block';
+          document.getElementById('kfInfo').innerHTML = `
+            <dl class="classify-result">
+              <dt>type</dt><dd>${kfData.animation_type}</dd>
+              <dt>duration</dt><dd>${kfData.duration_ms}ms</dd>
+              <dt>easing</dt><dd>${kfData.easing}</dd>
+              <dt>keyframes</dt><dd>${kfData.keyframes.length}개</dd>
+              <dt>loop</dt><dd>${kfData.loop}</dd>
+              <dt>origin</dt><dd>${kfData.transform_origin}</dd>
+            </dl>`;
+          // 스테이지 미리보기에 Lottie 오브젝트 대신 원본 이미지 사용
+          playKeyframePreview(kfData);
+          log('키프레임 자동 생성: ' + kfData.animation_type + ' → 편집 가능');
+
+          // panel1 보이기 (키프레임 편집 카드가 panel1 안에 있음)
+          document.getElementById('panel1').style.display = 'block';
+        }
+      } catch (kfErr) {
+        log('키프레임 자동 생성 실패: ' + kfErr.message);
+      }
+    }
   } catch (e) {
     log('Error: ' + e.message);
     document.getElementById('stage2Result').innerHTML = `<span class="badge badge-err">${e.message}</span>`;

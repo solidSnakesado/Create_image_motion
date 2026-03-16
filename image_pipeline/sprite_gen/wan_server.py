@@ -139,6 +139,7 @@ def api_generate():
     data = request.json or {}
     image_path = data.get("image_path", "")
     max_retries = int(data.get("max_retries", 7))
+    model_name = data.get("model_name", "")
     if not image_path or not os.path.exists(image_path):
         return jsonify({"error": f"이미지 없음: {image_path}"}), 400
 
@@ -153,6 +154,7 @@ def api_generate():
         "image_path": image_path,
         "stem": stem,
         "max_retries": max_retries,
+        "model_name": model_name,
         "start_attempt": start_attempt,
         "started_at": time.time(),
         "result": None,
@@ -164,16 +166,19 @@ def api_generate():
             backend, _ = _get_backend()
             import image_pipeline.sprite_gen.wan_backend as wb
             original_retries = wb.MAX_RETRIES
-            wb.MAX_RETRIES = max_retries
-
-            # 기존 영상 번호를 건너뛰기 위해 attempt_offset 설정
-            # wan_backend의 generate()에서 영상 파일명에 사용됨
+            original_model = wb.WAN_MODEL
             original_offset = getattr(wb, 'ATTEMPT_OFFSET', 0)
+
+            wb.MAX_RETRIES = max_retries
             wb.ATTEMPT_OFFSET = start_attempt
+            if model_name:
+                wb.WAN_MODEL = model_name
+                logger.info(f"[Generate] 모델 오버라이드: {model_name}")
             try:
                 result = backend.generate(image_path)
             finally:
                 wb.MAX_RETRIES = original_retries
+                wb.WAN_MODEL = original_model
                 wb.ATTEMPT_OFFSET = original_offset
 
             _jobs[job_id]["status"] = "done"
@@ -449,6 +454,26 @@ def api_browse():
     return jsonify({"dir": dir_path, "entries": entries})
 
 
+# ── 키프레임 생성 API ────────────────────────────────────────
+
+@app.route("/api/generate_keyframe", methods=["POST"])
+def api_generate_keyframe():
+    """suggested_action으로 키프레임 생성."""
+    from image_pipeline.sprite_gen.wan_keyframe_generator import WanKeyframeGenerator
+    data = request.json or {}
+    action = data.get("suggested_action", "wobble")
+    facing = data.get("facing_direction", "none")
+    duration = data.get("duration_ms")
+
+    gen = WanKeyframeGenerator()
+    config = gen.generate(
+        suggested_action=action,
+        facing_direction=facing,
+        duration_ms=int(duration) if duration else None,
+    )
+    return jsonify(config.to_dict())
+
+
 # ── Stage 2: 모션 키프레임 판단 ──────────────────────────────
 
 @app.route("/api/classify_motion", methods=["POST"])
@@ -471,6 +496,40 @@ def api_classify_motion():
         "reason":             result.reason,
         "suggested_keyframe": result.suggested_keyframe,
     })
+
+
+# ── 영상 첫 프레임 썸네일 ────────────────────────────────────
+
+@app.route("/api/video_thumb/<path:filepath>", methods=["GET"])
+def api_video_thumb(filepath):
+    """영상의 첫 프레임을 PNG로 추출하여 반환."""
+    import subprocess
+    import tempfile
+
+    if filepath.startswith("home/"):
+        full_path = "/" + filepath
+    elif filepath.startswith("outputs/"):
+        anim_root = os.path.join(os.path.expanduser("~"), "anim_pipeline")
+        full_path = os.path.join(anim_root, filepath)
+    else:
+        full_path = os.path.join(DIR_MOTION, filepath)
+
+    if not os.path.exists(full_path):
+        return jsonify({"error": "file not found"}), 404
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        subprocess.run([
+            "ffmpeg", "-i", full_path, "-frames:v", "1",
+            "-y", "-loglevel", "quiet", tmp_path,
+        ], capture_output=True, timeout=10)
+        if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+            return send_file(tmp_path, mimetype="image/png")
+        return jsonify({"error": "thumbnail extraction failed"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── 정적 파일 서빙 ───────────────────────────────────────────
