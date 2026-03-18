@@ -250,7 +250,11 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--sa
           <button class="btn btn-primary btn-sm" onclick="applyKfEdits()">적용 + 미리보기</button>
           <button class="btn btn-secondary btn-sm" onclick="replayKfAnim()">▶ 재생</button>
           <button class="btn btn-secondary btn-sm" onclick="resetKfEdits()">초기화</button>
-          <button class="btn btn-secondary btn-sm" onclick="exportKfJson()">JSON 내보내기</button>
+          <button class="btn btn-secondary btn-sm" onclick="exportKfJson()">🔑 키프레임 JSON</button>
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn-sm" onclick="exportCombinedLottie()" style="background:rgba(52,211,153,.15);color:var(--green);border:1px solid rgba(52,211,153,.3)">📦 통합 Lottie</button>
+          <button class="btn btn-sm" onclick="exportLottieOnly()" style="background:rgba(56,189,248,.15);color:var(--accent);border:1px solid rgba(56,189,248,.3)">🎬 모션 Lottie만</button>
         </div>
       </div>
 
@@ -941,6 +945,76 @@ function exportKfJson() {
   a.click();
   URL.revokeObjectURL(url);
   log('JSON 내보내기: ' + a.download);
+}
+
+async function exportCombinedLottie() {
+  const lottiePath = state.lottieData && state.lottieData.lottie_path;
+  if (!lottiePath) {
+    alert('Lottie 파일이 없습니다. 먼저 영상 선택 → Lottie 변환을 진행해주세요.');
+    return;
+  }
+  const kfData = state.currentKfData || state.originalKfData;
+  if (!kfData || !kfData.keyframes || kfData.keyframes.length === 0) {
+    alert('키프레임이 없습니다. 먼저 키프레임을 생성/편집해주세요.');
+    return;
+  }
+  log('통합 Lottie 내보내기 시작...');
+  try {
+    const res = await fetch(`${API}/api/export_combined`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ lottie_path: lottiePath, keyframe_data: kfData }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert('통합 내보내기 실패: ' + (err.error || '알 수 없는 오류'));
+      return;
+    }
+    const blob = await res.blob();
+    const stem = (state.stem || 'animation') + '_combined';
+    _downloadBlob(blob, stem + '.json');
+    log('통합 Lottie 다운로드: ' + stem + '.json');
+  } catch (e) {
+    alert('통합 내보내기 오류: ' + e.message);
+  }
+}
+
+async function exportLottieOnly() {
+  const lottiePath = state.lottieData && state.lottieData.lottie_path;
+  if (!lottiePath) {
+    alert('Lottie 파일이 없습니다. 먼저 영상 선택 → Lottie 변환을 진행해주세요.');
+    return;
+  }
+  log('모션 Lottie 다운로드 시작...');
+  try {
+    const res = await fetch(`${API}/api/export_lottie`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ lottie_path: lottiePath }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert('Lottie 다운로드 실패: ' + (err.error || '알 수 없는 오류'));
+      return;
+    }
+    const blob = await res.blob();
+    const name = lottiePath.split('/').pop() || 'motion.json';
+    _downloadBlob(blob, name);
+    log('모션 Lottie 다운로드: ' + name);
+  } catch (e) {
+    alert('Lottie 다운로드 오류: ' + e.message);
+  }
+}
+
+function _downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ── Step 2: Generate ─────────────────────────────────────────

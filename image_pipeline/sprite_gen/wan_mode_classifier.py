@@ -319,10 +319,76 @@ class WanModeClassifier:
         )
         return self._parse_response(response.text)
 
+    @staticmethod
+    def _extract_from_text(raw: str) -> dict:
+        """JSON 파싱 완전 실패 시 텍스트에서 키워드 추출."""
+        raw_lower = raw.lower()
+
+        # processing_mode
+        mode = "motion_needed"  # 안전 방향 fallback
+        if "keyframe_only" in raw_lower:
+            mode = "keyframe_only"
+
+        # has_deformable_parts
+        has_def = True
+        if '"has_deformable_parts"' in raw_lower:
+            after = raw_lower.split('"has_deformable_parts"')[1][:20]
+            if "false" in after:
+                has_def = False
+
+        # is_scene
+        is_scene = False
+        if '"is_scene"' in raw_lower:
+            after = raw_lower.split('"is_scene"')[1][:20]
+            if "true" in after:
+                is_scene = True
+
+        # facing_direction
+        facing = "none"
+        for d in ["left", "right", "up", "down"]:
+            if f'"{d}"' in raw_lower:
+                facing = d
+                break
+
+        # suggested_action
+        action = ""
+        for a in ["nudge_horizontal", "nudge_vertical", "wobble", "spin",
+                   "bounce", "pop", "launch", "float", "parabolic", "hop"]:
+            if f'"{a}"' in raw_lower:
+                action = a
+                break
+
+        return {
+            "processing_mode": mode,
+            "has_deformable_parts": has_def,
+            "is_scene": is_scene,
+            "facing_direction": facing,
+            "suggested_action": action,
+            "subject_desc": "parsed from incomplete response",
+            "reason": "JSON recovery fallback",
+        }
+
     def _parse_response(self, raw: str) -> ModeClassification:
-        """Gemini 응답 파싱."""
+        """Gemini 응답 파싱. 불완전한 JSON 복구 시도 포함."""
         clean = re.sub(r"```json|```", "", raw).strip()
-        data  = json.loads(clean)
+
+        # 1차: 정상 파싱
+        try:
+            data = json.loads(clean)
+        except json.JSONDecodeError:
+            # 2차: 따옴표/중괄호 수리 후 재파싱
+            repaired = clean
+            if repaired.count('"') % 2 != 0:
+                repaired += '"'
+            open_braces = repaired.count('{') - repaired.count('}')
+            repaired += '}' * max(0, open_braces)
+            try:
+                data = json.loads(repaired)
+                logger.info("[Stage1] JSON 복구 성공 (따옴표/중괄호 수리)")
+            except json.JSONDecodeError:
+                # 3차: 키워드 기반 추출 fallback
+                data = self._extract_from_text(raw)
+                logger.info("[Stage1] 키워드 기반 추출 fallback")
 
         # PRE-CHECK: 분류 불가
         if not data.get("is_classifiable", True):

@@ -474,6 +474,57 @@ def api_generate_keyframe():
     return jsonify(config.to_dict())
 
 
+# ── Lottie + Keyframe 통합 내보내기 ──────────────────────────
+
+@app.route("/api/export_combined", methods=["POST"])
+def api_export_combined():
+    """Lottie에 키프레임을 베이크하여 통합 파일 다운로드."""
+    from image_pipeline.sprite_gen.wan_lottie_baker import bake_keyframes
+
+    data = request.json or {}
+    lottie_path = data.get("lottie_path", "")
+    keyframe_data = data.get("keyframe_data", {})
+    output_name = data.get("output_name", "")
+
+    if not os.path.isabs(lottie_path):
+        anim_root = os.path.join(os.path.expanduser("~"), "anim_pipeline")
+        lottie_path = os.path.join(anim_root, lottie_path)
+
+    if not os.path.exists(lottie_path):
+        return jsonify({"error": f"Lottie 파일 없음: {lottie_path}"}), 404
+    if not keyframe_data or not keyframe_data.get("keyframes"):
+        return jsonify({"error": "keyframe_data 없음"}), 400
+
+    lottie_dir = os.path.dirname(lottie_path)
+    stem = output_name or (Path(lottie_path).stem + "_combined")
+    output_path = os.path.join(lottie_dir, f"{stem}.json")
+
+    try:
+        result_path = bake_keyframes(lottie_path, keyframe_data, output_path)
+        return send_file(result_path, mimetype="application/json",
+                         as_attachment=True, download_name=f"{stem}.json")
+    except Exception as e:
+        logger.error(f"[Export] 통합 실패: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/export_lottie", methods=["POST"])
+def api_export_lottie():
+    """원본 Lottie JSON (모션만) 다운로드."""
+    data = request.json or {}
+    lottie_path = data.get("lottie_path", "")
+
+    if not os.path.isabs(lottie_path):
+        anim_root = os.path.join(os.path.expanduser("~"), "anim_pipeline")
+        lottie_path = os.path.join(anim_root, lottie_path)
+
+    if not os.path.exists(lottie_path):
+        return jsonify({"error": f"Lottie 파일 없음: {lottie_path}"}), 404
+
+    return send_file(lottie_path, mimetype="application/json",
+                     as_attachment=True, download_name=Path(lottie_path).name)
+
+
 # ── Stage 2: 모션 키프레임 판단 ──────────────────────────────
 
 @app.route("/api/classify_motion", methods=["POST"])
