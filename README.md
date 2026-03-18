@@ -1,5 +1,5 @@
 # WAN I2V 파이프라인 개발 히스토리
-> 1주차: 2026-03-06 ~ 2026-03-08 | 2주차: 2026-03-09 ~ 2026-03-10
+> 1주차: 2026-03-06 ~ 2026-03-08 | 2주차: 2026-03-09 ~ 2026-03-10 | 3~4주차: 2026-03-11 ~ 2026-03-16
 > 목적: 검증 개발 과정 + 프롬프트 개선 과정 + 기능 수정 기록 + 환경 구성 기록
 
 ---
@@ -41,16 +41,48 @@ Vision Analyzer가 결정한 moving zone을 흑백 마스크 PNG로 생성.
 > 첫 프레임 테두리 색상으로 배경색을 감지하고, flood fill로 테두리와 연결된 배경만 투명 처리.
 > 캐릭터 내부 색상(흰색 배 등)은 보존.
 
+**wan_mode_classifier.py** (Stage 1 모드 분류) — 3~4주차 추가
+이미지가 WAN 모션 생성이 필요한지 사전 판단.
+> KEYFRAME_ONLY(강체) → WAN 건너뜀, MOTION_NEEDED(변형 가능) → WAN 생성 진행.
+> 10가지 suggested_action 중 하나를 결정 (물리적 속성 기반, 오브젝트 하드코딩 없음).
+
+**wan_post_motion_classifier.py** (Stage 2 모션 후 분류) — 3~4주차 추가
+WAN 생성 영상을 Gemini Vision으로 분석하여 키프레임 보강 필요 여부 판단.
+> TRAVEL(이동) / AMPLIFY(점프·부유 증폭) / NO_TRAVEL(제자리) 3가지 카테고리.
+> suggested_keyframe(hop, bounce, float 등)을 함께 반환.
+
+**wan_keyframe_generator.py** (키프레임 생성) — 3~4주차 추가
+KEYFRAME_ONLY 판정 또는 Stage 2 amplify 감지 시 CSS 키프레임 자동 생성.
+> 10가지 모션 패턴 (물리 수식 기반: 감쇠 정현파, 포물선, 사인파).
+
+**wan_lottie_converter.py** (Lottie 변환) — 3~4주차 추가
+투명 PNG 시퀀스를 Lottie JSON 애니메이션으로 변환.
+> 래스터 내장(base64), 4가지 프리셋 (original/web/web_hd/mobile).
+
+**wan_server.py** (REST API 서버) — 3~4주차 추가
+대시보드 프론트엔드용 Flask REST API. 기존 파이프라인 코드 무수정.
+
+**wan_dashboard.html** (대시보드 프론트엔드) — 3~4주차 추가
+5단계 워크플로우 시각적 테스트 도구. 키프레임 스테이지 뷰 + Lottie 동기화.
+
 ### 실행 순서
 ```
 이미지 입력
-  → wan_vision_analyzer (분석)
-  → wan_mask_generator (마스크)
-  → wan_backend (ComfyUI로 생성)
-  → wan_validator (수치 검증)
-  → wan_ai_validator (AI 검증)
-  → wan_backend (후처리 합성 with 마스크)
-  → wan_bg_remover (배경 제거 → APNG + WebM)
+  → wan_mode_classifier (Stage 1: KEYFRAME_ONLY vs MOTION_NEEDED)
+  │
+  ├─ KEYFRAME_ONLY → wan_keyframe_generator → JSON 저장 → 완료
+  │
+  └─ MOTION_NEEDED:
+       → wan_vision_analyzer (분석)
+       → wan_mask_generator (마스크)
+       → wan_backend (ComfyUI로 생성)
+       → wan_validator (수치 검증)
+       → wan_ai_validator (AI 검증)
+       → wan_backend (후처리 합성 with 마스크)
+       → wan_bg_remover (배경 제거 → APNG + WebM)
+       → wan_lottie_converter (Lottie JSON 변환)
+       → wan_post_motion_classifier (Stage 2: TRAVEL / AMPLIFY / NO_TRAVEL)
+       → wan_keyframe_generator (amplify 시 키프레임 보강)
 ```
 
 ---
@@ -85,7 +117,15 @@ Vision Analyzer가 결정한 moving zone을 흑백 마스크 PNG로 생성.
    - 8-5. [VRAM 누수 문제 확인 + 초기화 기능 추가](#8-5-vram-초기화)
    - 8-6. [검증 실패 통계 + 보완 조치 추적 기능](#8-6-검증-통계)
    - 8-7. [pingpong/bg_type/bg_remove AI 동적 판단](#8-7-pingpong-동적-판단)
-9. [PENDING](#9-pending)
+9. [3~4주차 개발 히스토리](#9-3~4주차-개발-히스토리)
+   - 9-1. [Stage 1 모드 분류기](#9-1-stage-1-모드-분류기)
+   - 9-2. [Stage 2 모션 후 분류기](#9-2-stage-2-모션-후-분류기)
+   - 9-3. [키프레임 생성기 (10종)](#9-3-키프레임-생성기)
+   - 9-4. [Lottie 변환기](#9-4-lottie-변환기)
+   - 9-5. [대시보드 프론트엔드](#9-5-대시보드-프론트엔드)
+   - 9-6. [출력 폴더 분리](#9-6-출력-폴더-분리)
+   - 9-7. [Lottie + CSS 키프레임 동기화](#9-7-lottie-css-키프레임-동기화)
+10. [PENDING](#10-pending)
 
 ---
 
@@ -1249,76 +1289,230 @@ Vision Analyzer 프롬프트에 **STEP 8** 추가:
 
 ---
 
-## 9. PENDING
+## 9. 3~4주차 개발 히스토리
 
-### 완료된 항목 (1주차 → 2주차)
-- ✅ Git 레포 구성 + 코드 업로드
-- ✅ WSL 새 환경 셋업 가이드 작성 + 실제 검증
-- ✅ RTX 50XX PyTorch 호환성 해결
-- ✅ ComfyUI 버전 고정 (VRAM 행 방지)
-- ✅ VRAM 초기화 기능 추가 (연속 생성 안정화)
-- ✅ 검증 실패 통계 + 보완 조치 추적 기능
-- ✅ 수치 실패 시 AI 이슈도 함께 기록 (`ai_issues` 필드 추가)
-- ✅ 매 시도마다 파일 저장 + 성공 시에도 기록 (flush 방식 — remedy/ai_issues 확정 후 저장)
-- ✅ VRAM 모니터링 — 매 시도마다 `nvidia-smi` 측정, 터미널 + 파일 기록
-- ✅ 요약 통계 터미널 전용 — 파일에는 개별 시도 + 구분선만 기록
-- ✅ `load_history()` 파서 — 기존(구 포맷) + 신규(신 포맷) 모두 파싱 가능
-- ✅ WebM(VP9+alpha) 출력 추가 (`wan_bg_remover.py`)
-- ✅ AI 통계 라벨 명확화 (AI검증 단독 실패 / AI이슈 발생 분리)
-- ✅ `CONSECUTIVE_FAIL_THRESHOLD = 2` (연속 실패 2회 시 액션 전환)
-- ✅ pingpong / bg_type / bg_remove AI 동적 판단 (STEP 8 추가)
-  - Gemini Vision이 포즈 기반으로 이동 감지 → pingpong=false
-  - 배경 유형 판단 (solid/scene) → BG 프롬프트 자동 분기
-  - bg_remove 조건 처리 (scene이면 배경 제거 스킵)
-  - 포즈 기반 판단으로 흰 배경에서도 이동 포즈 정상 감지
+> 3주차: 2026-03-11 ~ 2026-03-13 | 4주차: 2026-03-13 ~ 2026-03-16
+
+---
+
+### 9-1. Stage 1 모드 분류기 (wan_mode_classifier.py)
+**날짜:** 2026-03-13
+
+#### 개요
+이미지 입력 시 WAN 모션 생성이 필요한지 사전 판단하는 Stage 1 게이트.
+KEYFRAME_ONLY(강체) → WAN 건너뜀, MOTION_NEEDED(변형 가능) → WAN 생성 진행.
+
+#### 판단 구조
+```
+PRE-CHECK:
+  A) 이산적 주체 없음 → KEYFRAME_ONLY/pop
+  B) 복합 주체 → 가장 큰 주체 기준
+  C) 비정형(불/연기) → KEYFRAME_ONLY/wobble
+  D) 장면 배경(road/sky/trees) → 강제 MOTION_NEEDED
+
+Q1. 변형 가능 부위가 있는가?
+  NO  → KEYFRAME_ONLY (suggested_action 포함)
+  YES → MOTION_NEEDED
+```
+
+#### suggested_action (10가지)
+nudge_horizontal, nudge_vertical, wobble, spin, bounce, pop, launch, float, parabolic, hop
+
+#### 설계 원칙
+- 프롬프트에 특정 오브젝트 이름 0건 (물리적 속성 기반 판단만)
+- fallback: MOTION_NEEDED (안전 방향)
+- temperature=0.1
+
+---
+
+### 9-2. Stage 2 모션 후 분류기 (wan_post_motion_classifier.py)
+**날짜:** 2026-03-13, 2026-03-16 확장
+
+#### 개요
+WAN 생성 영상을 Gemini Vision으로 분석하여 CSS 키프레임 보강 필요 여부 판단.
+
+#### 3가지 카테고리 (확장)
+| 카테고리 | 유형 | 설명 | suggested_keyframe |
+|---|---|---|---|
+| A. TRAVEL | travel_lateral/vertical/diagonal | 프레임 밖으로 이탈 | launch, nudge_* |
+| B. AMPLIFY | amplify_hop | 전신 점프 후 착지 | hop, bounce |
+| | amplify_sway | 좌우 몸통 기울임 | wobble |
+| | amplify_float | 느린 상하 부유 | float |
+| C. NO_TRAVEL | no_travel | 부위만 움직임 | — |
+
+#### amplify 카테고리 추가 배경
+개구리 점프 영상이 "원위치 복귀 → no_travel"로 오판정되는 문제 해결.
+핵심 구분: "전신이 올라가면 amplify_hop, 부위만 움직이면 no_travel"
+
+#### 원본 이미지 선택적 처리
+외부 생성 영상(grok 등)은 원본 이미지가 없을 수 있음.
+원본 이미지 없이 영상만으로 분석 가능하도록 수정.
+
+#### JSON 파싱 안정화
+- max_output_tokens 500→2000 확대
+- 불완전 JSON 복구 (잘린 따옴표/중괄호 닫기)
+- 키워드 기반 추출 fallback
+
+---
+
+### 9-3. 키프레임 생성기 (wan_keyframe_generator.py)
+**날짜:** 2026-03-13, 2026-03-16
+
+#### 개요
+KEYFRAME_ONLY 판정 이미지 또는 Stage 2 amplify 감지 시 CSS 키프레임 자동 생성.
+물리 수식 기반 — 오브젝트 종류 하드코딩 없음.
+
+#### 10가지 패턴
+| 패턴 | 동작 | 수식 | loop | 기본 duration |
+|---|---|---|---|---|
+| nudge_horizontal | 좌우 감쇠 진동 | A·sin(ωt)·e^(-λt) | ✅ | 1200ms |
+| nudge_vertical | 상하 감쇠 진동 | 동일 | ✅ | 1000ms |
+| wobble | 좌우 회전 흔들림 | 감쇠 정현파 | ✅ | 1500ms |
+| spin | Y축 회전 (scaleX) | scaleX 진동 | ✅ | 1000ms |
+| bounce | squash & stretch | 키프레임 직접 | ✅ | 800ms |
+| pop | 미세 스케일 펄스 | 키프레임 직접 | ✅ | 500ms |
+| launch | 한 방향 가속 → 멈춤 | ease-out 곡선 | ❌ | 2000ms |
+| float | 상하 부유 + 좌우 | sin/cos | ✅ | 3000ms |
+| parabolic | 포물선 궤적 | y=-4h·t(t-1) | ❌ | 1500ms |
+| hop | 제자리 올라갔다 내려오기 | y=-4h·t(t-1) | ❌ | 1200ms |
+
+---
+
+### 9-4. Lottie 변환기 (wan_lottie_converter.py)
+**날짜:** 2026-03-13
+
+#### 개요
+투명 PNG 시퀀스를 Lottie JSON 애니메이션으로 변환. 래스터 내장(base64) 방식.
+
+#### 프리셋별 용량
+| 프리셋 | 해상도 | 최대 프레임 | 예상 용량 |
+|---|---|---|---|
+| original (기본) | 원본 | 전체 | ~7MB |
+| web | 240px | 30 | ~2.1MB |
+| web_hd | 360px | 40 | ~4.3MB |
+| mobile | 180px | 24 | ~0.3MB |
+
+---
+
+### 9-5. 대시보드 프론트엔드 (wan_server.py + wan_dashboard.html)
+**날짜:** 2026-03-13 ~ 2026-03-16
+
+#### 개요
+5단계 워크플로우를 시각적으로 테스트하는 독립 대시보드.
+기존 파이프라인 코드 무수정 — wan_server.py + wan_dashboard.html 2개만 추가.
+
+#### 기능 목록
+- **파일 브라우저**: 대화상자로 서버 파일 시스템 탐색, 이미지 미리보기
+- **Stage 1 분류**: 결과 표시, KEYFRAME_ONLY 시 키프레임 편집 UI 자동 표시
+- **모션 생성**: 생성 횟수 입력(1~20), 실시간 영상 확인, 모델 선택 드롭다운
+- **모델 선택**: WAN 2.1 Q3~Q5 / WAN 2.2 MoE Q3~Q4 / WAN 2.2 TI2V 5B
+- **영상 탭**: "현재 이미지" / "전체 영상" 탭 분리
+- **배경 제거 + Lottie**: 변환 후 lottie-web으로 미리보기
+- **Stage 2 키프레임 판단**: amplify 감지 시 키프레임 자동 생성
+- **키프레임 스테이지 뷰**: Lottie + CSS 키프레임 동기화 미리보기
+  - 스테이지 크기 설정 (400×300 ~ 1024×768)
+  - 배경 선택 (체크무늬/흰색/하늘/어두운/커스텀 이미지)
+  - 오브젝트 크기 조절
+  - 모션 모드: 점프(hop) / 부유(float) / 한 방향(oneway) / 진동(oscillate)
+  - 슬라이더: 움직임 크기, 속도, 시작위치 X/Y, rotate, scale
+  - "▶ 재생" 버튼 (1회 재생 후 원위치 복귀)
+  - JSON 내보내기
+- **실패 통계 그래프**: Chart.js (attempt별 막대 + 이슈 분포 도넛)
+
+#### REST API 엔드포인트
+| 엔드포인트 | 역할 |
+|---|---|
+| POST /api/classify | Stage 1 분류 |
+| POST /api/generate | WAN 모션 생성 (비동기) |
+| GET /api/status/<job_id> | 생성 진행 + 실시간 영상 목록 |
+| GET /api/videos/<stem> | 특정 이미지 영상 목록 |
+| GET /api/videos_all | 전체 영상 목록 |
+| POST /api/select_video | 배경 제거 + Lottie 변환 |
+| POST /api/classify_motion | Stage 2 판단 |
+| POST /api/generate_keyframe | 키프레임 생성 |
+| GET /api/stats/<stem> | 이미지별 생성 통계 |
+| GET /api/stats_all | 전체 누적 통계 |
+| GET /api/browse | 파일 브라우저 |
+| GET /api/video_thumb/<path> | 영상 첫 프레임 썸네일 |
+| GET /api/files/<path> | 정적 파일 서빙 |
+
+---
+
+### 9-6. 출력 폴더 분리
+**날짜:** 2026-03-16
+
+```
+outputs/wan/
+  ├── motion/              ← WAN 모션 생성 결과 (mp4, 배경제거, Lottie)
+  ├── keyframe_only/       ← 키프레임만 (JSON, WAN 미사용)
+  ├── motion_keyframe/     ← 모션 + 키프레임 (향후 사용)
+  └── validation_stats.txt ← 검증 통계
+```
+
+---
+
+### 9-7. Lottie + CSS 키프레임 동기화
+**날짜:** 2026-03-16
+
+#### 개요
+WAN이 생성한 Lottie 모션(내부 애니메이션)과 CSS 키프레임(위치 이동)을 동기화하여 미리보기.
+
+#### 구조
+```
+[outer div] ← CSS keyframe animate (translateY hop)
+  └── [inner div] ← Lottie bodymovin (SVG 내부 애니메이션)
+```
+
+#### 동기화 방식
+- Stage 2에서 hop 감지 → Lottie duration_ms 자동 전달 → 키프레임 duration 동기화
+- "움직임 크기" 슬라이더로 점프 높이 실시간 조절
+- "▶ 재생" 버튼으로 1회 재생 후 원위치 복귀
+
+#### 발생했던 문제와 해결
+- Lottie SVG transform과 CSS animate transform 충돌 → 2중 div 구조로 분리
+- Web Animation API의 animate 누적 → getAnimations().cancel() 또는 전체 재생성
+- setTimeout(50ms)으로 DOM paint 대기 후 animate 적용
+
+---
+
+## 10. PENDING
+
+### 완료된 항목 (3~4주차)
+- ✅ Stage 1 모드 분류기 (KEYFRAME_ONLY vs MOTION_NEEDED)
+- ✅ Stage 2 모션 후 분류기 (TRAVEL / AMPLIFY / NO_TRAVEL)
+- ✅ 키프레임 생성기 10종 (물리 수식 기반)
+- ✅ Lottie 변환기 (4 프리셋)
+- ✅ 대시보드 프론트엔드 (wan_server.py + wan_dashboard.html)
+- ✅ 출력 폴더 분리 (motion / keyframe_only / motion_keyframe)
+- ✅ 모델 선택 드롭다운 (WAN 2.1/2.2 양자화별)
+- ✅ 영상 탭 분리 (현재 이미지 / 전체 영상)
+- ✅ 키프레임 스테이지 뷰 + Lottie 동기화
+- ✅ 실패 통계 그래프 (Chart.js)
+- ✅ Stage 2 amplify 감지 (점프 모션 → hop 키프레임 자동 생성)
+- ✅ 1회 재생 후 원위치 복귀 (hop)
 
 ### 남은 항목
-- 🟡 `--cache-none` 옵션 테스트 (VRAM 누수 추가 방지)
-- 🟡 **실패 이력 참조 기능** (아래 상세)
-- 🟡 실패 이력 기반 negative 프롬프트 자동 강화 (빈발 이슈 → 중국어 매핑)
+- 🟡 키프레임 생성기 확장: 원운동(circular), 진자운동(pendulum), 제자리 회전(rotate_continuous), 떨림(vibrate) 추가
+- 🟡 비전 분석 기반 모션 유형 자동 선택 → 프론트엔드 동적 옵션창 연동
+- 🟡 MOTION + TRAVEL 동기화: Stage 2에서 TRAVEL 감지 시 Lottie + translate 키프레임 동기화
+- 🟡 모델 성능 비교 기능: 생성 시간, VRAM, 성공률, 모션 스코어 등 모델별 비교
+- 🟡 LLM 비전 모델 교체 테스트: Gemini 2.5-flash vs 2.5-pro, OpenAI/Claude 비교
+- 🟢 `--cache-none` 옵션 테스트 (VRAM 누수 추가 방지)
 - 🟢 characters2/ + vehicles/ 40개 이미지 일괄 실행
-- 🟢 cartoon_animals/ 10개 이미지 일괄 실행
-- 🟢 validation_stats.txt 데이터 기반 검증 임계값 최적화
-- 🟢 프론트엔드 스프라이트 모션 뷰어 (React, 클릭→애니메이션 1회 재생→원본 복귀)
+- 🟢 validation_stats.txt 기반 검증 임계값 최적화
 
-### 예정 기능: 실패 이력 참조 프롬프트 자동 주입
-
-**개요:**
-동일 이미지로 재실행 시, 이전 실패 기록을 읽어서 초기 프롬프트에 반영.
-반복 실패를 피하고 첫 시도부터 성공률을 높이는 것이 목적.
-
-**구현 방식:**
-```
-generate("frog_01.png") 시작
-  → validation_stats에서 "frog_01" 이전 기록 검색
-  → 이전 실패 패턴 발견:
-      ghosting 3회, unnatural_movement 3회, 점프/머리끄덕임 둘 다 실패
-  → Vision Analyzer에 힌트 전달:
-      "이전에 점프와 머리끄덕임이 실패했고, ghosting/unnatural이 빈발.
-       다른 액션과 프롬프트를 결정하라"
-  → Gemini가 이전 실패를 피하는 방향으로 분석
-```
-
-**활용 가능한 데이터:**
-| 기록 데이터 | 활용 방법 |
-|---|---|
-| 실패한 액션 목록 | `analyze_with_exclusion()`에 복수 제외 전달 |
-| 수치 실패 항목 빈도 | negative 프롬프트에 미리 억제 문구 추가 |
-| AI 이슈 빈도 | positive에 형태 보존 문구 강화 |
-| 성공했던 프롬프트 | 성공 기록이 있으면 그 프롬프트를 재활용 |
-
-**필요한 변경:**
-1. ~~`validation_stats.txt` → JSON 형식 전환~~ → `load_history()` 파서로 기존 txt 직접 파싱 (구현 완료)
-2. 성공 시 positive/negative 프롬프트도 파일에 저장
-3. `generate()` 시작 시 이전 기록 로드 → Vision Analyzer 프롬프트에 주입
-
-### 파이프라인 실행 방법 (2주차 기준)
+### 파이프라인 실행 방법 (4주차 기준)
 ```bash
-# 터미널 1 — ComfyUI (버전 고정 + lowvram)
+# 터미널 1 — ComfyUI
 cd ~/ComfyUI && source venv/bin/activate
-python main.py --listen --lowvram
+python main.py --listen
 
-# 터미널 2 — 파이프라인
+# 터미널 2 — WAN 대시보드 서버
+cd ~/anim_pipeline && source animVenv/bin/activate
+PYTHONPATH=~/anim_pipeline python image_pipeline/sprite_gen/wan_server.py
+# → http://localhost:5001
+
+# CLI 직접 실행 (선택)
 cd ~/anim_pipeline && source animVenv/bin/activate
 python3 -c "
 import os, logging
@@ -1332,6 +1526,46 @@ backend = WanBackend(
 )
 backend.generate('/path/to/image.png')
 "
+```
+
+### 파일 현황 (4주차 기준, 13개)
+| 파일 | 줄 수 | 역할 | 상태 |
+|---|---|---|---|
+| wan_backend.py | 2515 | 메인 오케스트레이터 | 수정 |
+| wan_mode_classifier.py | 387 | Stage 1 분류 | 신규 |
+| wan_post_motion_classifier.py | 406 | Stage 2 분류 | 신규 |
+| wan_keyframe_generator.py | 513 | 키프레임 생성 (10종) | 신규 |
+| wan_lottie_converter.py | 248 | Lottie JSON 변환 | 신규 |
+| wan_server.py | 550+ | REST API 서버 | 신규 |
+| wan_dashboard.html | 1300+ | 대시보드 프론트엔드 | 신규 |
+| wan_vision_analyzer.py | 491 | 이미지 분석 | 미수정 |
+| wan_validator.py | 708 | 수치 검증 | 미수정 |
+| wan_ai_validator.py | 541 | AI 검증 | 미수정 |
+| wan_mask_generator.py | 104 | 마스크 생성 | 미수정 |
+| wan_bg_remover.py | 254 | 배경 제거 | 미수정 |
+
+### 전체 처리 흐름 (4주차 기준)
+```
+이미지 입력
+  │
+  ├─ Stage 1: WanModeClassifier
+  │    ├─ KEYFRAME_ONLY → WanKeyframeGenerator → JSON → 프론트 편집 → 완료
+  │    └─ MOTION_NEEDED → WAN 생성 진행 ↓
+  │
+  ├─ WAN 모션 생성 (motion/ 폴더)
+  │    ├─ Vision 분석 → 프롬프트 생성
+  │    ├─ ComfyUI 생성 루프 (MAX_RETRIES회, 모델 선택 가능)
+  │    ├─ 수치 검증 + AI 검증
+  │    └─ 후처리 합성
+  │
+  ├─ 영상 선택 (수동, 현재이미지/전체 탭)
+  │
+  ├─ 배경 제거 → PNG 시퀀스 → Lottie JSON
+  │
+  └─ Stage 2: WanPostMotionClassifier
+       ├─ NO_TRAVEL → 모션만 사용
+       ├─ AMPLIFY → 키프레임 자동 생성 + 편집 UI (Lottie 동기화)
+       └─ TRAVEL → 이동 키프레임 추가 (motion_keyframe/)
 ```
 
 ---
