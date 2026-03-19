@@ -1685,6 +1685,91 @@ class WanBackend:
             kf_path = os.path.join(self.dir_keyframe_only, f"{stem}_keyframe.json")
             kf_config.to_json(kf_path)
 
+            # ── 정지 이미지 → Lottie + 키프레임 베이크 ────────
+            lottie_path = None
+            combined_lottie_path = None
+            try:
+                from image_pipeline.sprite_gen.wan_lottie_converter import WanLottieConverter
+                from image_pipeline.sprite_gen.wan_lottie_baker import bake_keyframes
+                from image_pipeline.sprite_gen.wan_bg_remover import WanBgRemover
+                from PIL import Image as PILImage
+                import tempfile
+
+                kf_out_dir = os.path.join(self.dir_keyframe_only, f"{stem}_transparent")
+                os.makedirs(kf_out_dir, exist_ok=True)
+
+                # 1) 배경 제거 (원본 이미지 → 투명 PNG 1장)
+                img = PILImage.open(image_path).convert("RGBA")
+                # 단순 배경 제거: 테두리 색 기반
+                import numpy as np
+                from scipy import ndimage
+                arr = np.array(img.convert("RGB"))
+                H, W = arr.shape[:2]
+                border_size = max(3, H // 20)
+                border_px = np.concatenate([
+                    arr[:border_size, :, :].reshape(-1, 3),
+                    arr[-border_size:, :, :].reshape(-1, 3),
+                    arr[:, :border_size, :].reshape(-1, 3),
+                    arr[:, -border_size:, :].reshape(-1, 3),
+                ])
+                bg_color = border_px.mean(axis=0)
+                is_bg = np.all(np.abs(arr.astype(int) - bg_color) < 50, axis=2)
+                labeled, _ = ndimage.label(is_bg)
+                border_labels = (
+                    set(labeled[0, :].tolist()) |
+                    set(labeled[-1, :].tolist()) |
+                    set(labeled[:, 0].tolist()) |
+                    set(labeled[:, -1].tolist())
+                )
+                border_labels.discard(0)
+                bg_mask = np.zeros((H, W), dtype=bool)
+                for lbl in border_labels:
+                    bg_mask |= (labeled == lbl)
+                rgba = np.array(img)
+                rgba[bg_mask, 3] = 0
+                transparent = PILImage.fromarray(rgba, "RGBA")
+
+                # 투명 PNG 저장
+                frame_path = os.path.join(kf_out_dir, f"{stem}_frame_0000.png")
+                transparent.save(frame_path, "PNG")
+                logger.info(f"  [KF-Lottie] 배경 제거 완료: {frame_path}")
+
+                # 2) 단일 프레임 → Lottie (정지 이미지 기반)
+                converter = WanLottieConverter()
+                lottie_path = os.path.join(self.dir_keyframe_only, f"{stem}_lottie.json")
+                fps = 16
+                kf_duration_ms = kf_config.duration_ms
+                # 키프레임 duration에 맞춰 프레임 수 결정 (동일 이미지 반복)
+                frame_count = max(2, int(fps * kf_duration_ms / 1000))
+
+                # 동일 이미지를 frame_count만큼 복제
+                for i in range(1, frame_count):
+                    dup_path = os.path.join(kf_out_dir, f"{stem}_frame_{i:04d}.png")
+                    transparent.save(dup_path, "PNG")
+
+                converter.convert(
+                    png_dir=kf_out_dir,
+                    output_path=lottie_path,
+                    fps=fps,
+                    loop=kf_config.loop,
+                    preset="web",
+                )
+                logger.info(f"  [KF-Lottie] Lottie 생성 완료: {lottie_path}")
+
+                # 3) 키프레임 베이크 → 통합 Lottie
+                combined_lottie_path = os.path.join(
+                    self.dir_keyframe_only, f"{stem}_combined.json"
+                )
+                bake_keyframes(
+                    lottie_path=lottie_path,
+                    keyframe_data=kf_config.to_dict(),
+                    output_path=combined_lottie_path,
+                )
+                logger.info(f"  [KF-Lottie] 통합 Lottie 완료: {combined_lottie_path}")
+
+            except Exception as e:
+                logger.warning(f"  [KF-Lottie] Lottie 생성 실패 (키프레임만 사용): {e}")
+
             logger.info(
                 f"\n  ✅ KEYFRAME_ONLY 판정 → WAN 생성 건너뜀\n"
                 f"  → subject: {mode.subject_desc}\n"
@@ -1693,6 +1778,8 @@ class WanBackend:
                 f"  → keyframe: {kf_config.animation_type} "
                 f"{kf_config.duration_ms}ms {len(kf_config.keyframes)}kf\n"
                 f"  → saved:   {kf_path}\n"
+                f"  → lottie:  {lottie_path or 'N/A'}\n"
+                f"  → combined: {combined_lottie_path or 'N/A'}\n"
                 f"  → reason:  {mode.reason}\n"
                 f"{'═'*55}"
             )

@@ -564,6 +564,19 @@ async function runClassify() {
           document.getElementById('kfJsonPath').textContent = kfData.json_path;
         }
 
+        // Lottie 경로가 있으면 state에 저장 (내보내기 버튼 활성화)
+        if (data.lottie_path) {
+          state.lottieData = {
+            lottie_path: data.lottie_path,
+            combined_lottie_path: data.combined_lottie_path,
+            lottie_info: data.lottie_info,
+          };
+          const infoHtml = data.lottie_info
+            ? ` | Lottie: ${data.lottie_info.frame_count}f ${data.lottie_info.file_size_mb.toFixed(1)}MB`
+            : '';
+          log('KEYFRAME_ONLY Lottie 생성 완료' + infoHtml);
+        }
+
         // 키프레임 미리보기: 원본 이미지에 CSS 애니메이션 적용
         playKeyframePreview(kfData);
 
@@ -948,6 +961,22 @@ function exportKfJson() {
 }
 
 async function exportCombinedLottie() {
+  // KEYFRAME_ONLY에서 이미 생성된 combined가 있으면 직접 다운로드
+  const combinedPath = state.lottieData && state.lottieData.combined_lottie_path;
+  if (combinedPath) {
+    try {
+      const res = await fetch(`${API}/api/files/${combinedPath}`);
+      if (res.ok) {
+        const blob = await res.blob();
+        const stem = (state.stem || 'animation') + '_combined';
+        _downloadBlob(blob, stem + '.json');
+        log('통합 Lottie 다운로드 (생성 완료): ' + stem + '.json');
+        return;
+      }
+    } catch (e) { /* fallback to bake */ }
+  }
+
+  // 기존 경로: 서버에서 실시간 베이크
   const lottiePath = state.lottieData && state.lottieData.lottie_path;
   if (!lottiePath) {
     alert('Lottie 파일이 없습니다. 먼저 영상 선택 → Lottie 변환을 진행해주세요.');

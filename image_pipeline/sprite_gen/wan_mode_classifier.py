@@ -168,6 +168,32 @@ Answer NO when you observe:
   - Surface details (painted eyes, decals, patterns) that are part of the rigid surface
     → these move WITH the body, they don't deform independently
 
+CRITICAL — RIGID BODY RULE:
+  Metal objects, mechanical parts, tools, and hardware are ALMOST ALWAYS rigid bodies.
+  Even if they have complex shapes (gears, teeth, ornamental edges, engravings),
+  the parts do NOT bend or flex — they are fused into one solid piece.
+
+  RIGID (keyframe_only):
+    - Keys, locks, coins, medals, badges, buckles
+    - Swords, daggers, axes, hammers, wrenches, screwdrivers
+    - Gears, bolts, nuts, screws, nails, chains (single link)
+    - Bottles, cups, vases, jars, crystals, gems, rings
+    - Boxes, crates, books (closed), phones, remotes
+    - Any object made of metal, glass, ceramic, stone, or hard plastic
+      where all parts are fused together with no moving joints
+
+  NOT RIGID (motion_needed):
+    - Objects with VISIBLE HINGES or JOINTS that clearly separate two parts
+    - Scissors (two blades joined by a pivot)
+    - Pliers, tongs (two arms joined by a pivot)
+    - Chains (multiple links that flex relative to each other)
+    - Puppets, dolls with articulated limbs
+    - Flowers with visible stems that would sway
+
+  ASK YOURSELF: "Can I see a joint, hinge, or flexible connection
+                  where TWO SEPARATE PARTS would move relative to each other?"
+  If NO → the object is rigid → keyframe_only.
+
 KEY PRINCIPLE:
   The question is NOT "what is this object?"
   The question IS "would any visible part change its outline shape during motion?"
@@ -233,16 +259,18 @@ OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Respond ONLY with JSON. No text outside JSON. No markdown fences.
 
+CRITICAL: Put decision fields FIRST. Keep subject_desc under 15 words.
+
 {
   "is_classifiable": <true or false>,
-  "is_scene": <true or false — true if environmental background detected>,
-  "subject_desc": "<brief visual description of the subject>",
+  "is_scene": <true or false>,
   "has_deformable_parts": <true or false>,
-  "deformable_reasoning": "<describe WHAT structural feature you observed — do not name the object category>",
   "processing_mode": "<keyframe_only | motion_needed>",
   "facing_direction": "<left | right | up | down | none>",
   "suggested_action": "<nudge_horizontal | nudge_vertical | wobble | spin | bounce | pop | launch | float | parabolic | hop | (empty string)>",
-  "reason": "<1-sentence summary referencing structural observations, not the object name>"
+  "deformable_reasoning": "<1 sentence: what structural feature you observed>",
+  "subject_desc": "<under 15 words: brief visual description>",
+  "reason": "<1 sentence: summary referencing structural observations>"
 }"""
 
 
@@ -321,20 +349,74 @@ class WanModeClassifier:
 
     @staticmethod
     def _extract_from_text(raw: str) -> dict:
-        """JSON 파싱 완전 실패 시 텍스트에서 키워드 추출."""
+        """JSON 파싱 완전 실패 시 텍스트에서 키워드 추출. 보편적 강체 감지 포함."""
         raw_lower = raw.lower()
 
-        # processing_mode
+        # processing_mode — 직접 키워드 검색
         mode = "motion_needed"  # 안전 방향 fallback
         if "keyframe_only" in raw_lower:
             mode = "keyframe_only"
 
-        # has_deformable_parts
-        has_def = True
+        # has_deformable_parts — 직접 키/값 검색
+        has_def = None  # 아직 판정 전
         if '"has_deformable_parts"' in raw_lower:
-            after = raw_lower.split('"has_deformable_parts"')[1][:20]
+            after = raw_lower.split('"has_deformable_parts"')[1][:30]
             if "false" in after:
                 has_def = False
+            elif "true" in after:
+                has_def = True
+
+        # processing_mode 주변에서도 교차 검증
+        if '"processing_mode"' in raw_lower:
+            after = raw_lower.split('"processing_mode"')[1][:40]
+            if "keyframe_only" in after:
+                mode = "keyframe_only"
+                if has_def is None:
+                    has_def = False  # processing_mode=keyframe_only → 강체 추론
+
+        # ── 보편적 강체 감지 (하드코딩 오브젝트 리스트 없음) ──────
+        # Gemini 프롬프트가 RIGID BODY RULE로 응답하면 deformable_reasoning에
+        # 부정 표현이 포함됨. JSON이 깨져도 이 패턴은 raw 텍스트에 남아 있음.
+        if has_def is None:
+            # 방법 1: deformable_reasoning 필드에서 부정 표현 감지
+            _NEGATIVE_PATTERNS = [
+                "no joint", "no hinge", "no articulation", "no pivot",
+                "no flexible", "no deformable", "no moving part",
+                "does not bend", "does not flex", "does not deform",
+                "cannot bend", "cannot flex",
+                "rigid body", "rigid object", "single solid",
+                "one solid piece", "fused together", "moves as one unit",
+                "all parts are rigidly", "no visible joint",
+                # 중국어 부정 표현 (Gemini가 중국어로 응답할 수 있음)
+                "没有关节", "没有铰链", "不弯曲", "不变形",
+                "刚性", "刚体", "一体", "整体移动",
+            ]
+            rigid_reasoning = any(p in raw_lower for p in _NEGATIVE_PATTERNS)
+
+            # 방법 2: answer NO 구간의 특징적 표현 감지
+            # Gemini가 Q1에 NO로 답하면서 사용하는 전형적 표현
+            _NO_DEFORM_EXPRESSIONS = [
+                "answer no", "answer is no",
+                "would not change shape", "would not deform",
+                "outline shape would not", "shape does not change",
+                "maintains its exact shape", "maintains its shape",
+                "no part would bend", "no part would flex",
+                "whole subject moves as one",
+            ]
+            no_answer = any(p in raw_lower for p in _NO_DEFORM_EXPRESSIONS)
+
+            if rigid_reasoning or no_answer:
+                has_def = False
+                mode = "keyframe_only"
+                logger.info(
+                    f"[Stage1] 강체 패턴 감지: "
+                    f"rigid_reasoning={rigid_reasoning} no_answer={no_answer} "
+                    f"→ keyframe_only 전환"
+                )
+
+        # 최종 기본값: 판정 불가 → 안전 방향 (motion_needed)
+        if has_def is None:
+            has_def = True
 
         # is_scene
         is_scene = False
@@ -369,8 +451,14 @@ class WanModeClassifier:
         }
 
     def _parse_response(self, raw: str) -> ModeClassification:
-        """Gemini 응답 파싱. 불완전한 JSON 복구 시도 포함."""
+        """Gemini 응답 파싱. 불완전한 JSON 복구 시도 포함. [v3-universal]"""
+        # ── 디버그: Gemini 원본 응답 출력 (파일 적용 확인용) ────
+        logger.info(
+            f"[Stage1] [v3] raw 응답 (첫 300자): {raw[:300]}"
+        )
         clean = re.sub(r"```json|```", "", raw).strip()
+
+        data = None  # 파싱 결과 초기화
 
         # 1차: 정상 파싱
         try:
@@ -386,9 +474,34 @@ class WanModeClassifier:
                 data = json.loads(repaired)
                 logger.info("[Stage1] JSON 복구 성공 (따옴표/중괄호 수리)")
             except json.JSONDecodeError:
-                # 3차: 키워드 기반 추출 fallback
-                data = self._extract_from_text(raw)
-                logger.info("[Stage1] 키워드 기반 추출 fallback")
+                pass
+
+        # ── 디버그: 복구된 데이터 내용 출력 ──────────────────
+        if data is not None:
+            logger.info(
+                f"[Stage1] 복구된 데이터: keys={list(data.keys())[:8]} "
+                f"| mode={data.get('processing_mode')} "
+                f"| deform={data.get('has_deformable_parts')} "
+                f"| scene={data.get('is_scene')}"
+            )
+
+        # ── 핵심 필드 검증: 둘 다 없으면 3차로 전환 ──────────
+        _REQUIRED = {"has_deformable_parts", "processing_mode"}
+        if data is not None and not (_REQUIRED & set(data.keys())):
+            logger.warning(
+                f"[Stage1] 복구된 JSON에 핵심 필드 누락 "
+                f"(있는 키: {list(data.keys())[:5]}) → 키워드 추출로 전환"
+            )
+            data = None
+
+        # 3차: 키워드 기반 추출 fallback
+        if data is None:
+            data = self._extract_from_text(raw)
+            logger.info("[Stage1] 키워드 기반 추출 fallback")
+            logger.info(
+                f"[Stage1] fallback 데이터: mode={data.get('processing_mode')} "
+                f"| deform={data.get('has_deformable_parts')}"
+            )
 
         # PRE-CHECK: 분류 불가
         if not data.get("is_classifiable", True):
@@ -402,7 +515,26 @@ class WanModeClassifier:
             )
 
         is_scene = bool(data.get("is_scene", False))
-        has_deformable = bool(data.get("has_deformable_parts", True))
+
+        # ── has_deformable_parts 결정 ─────────────────────────
+        #   필드 존재 → 그 값 사용
+        #   누락 + processing_mode=keyframe_only → False 추론
+        #   둘 다 불명확 → True (안전 방향 = MOTION_NEEDED)
+        if "has_deformable_parts" in data:
+            has_deformable = bool(data["has_deformable_parts"])
+        elif data.get("processing_mode") == "keyframe_only":
+            has_deformable = False
+            logger.info(
+                "[Stage1] has_deformable_parts 누락 → "
+                "processing_mode=keyframe_only에서 False 추론"
+            )
+        else:
+            has_deformable = True
+            logger.warning(
+                "[Stage1] has_deformable_parts 누락 + "
+                f"processing_mode={data.get('processing_mode')} "
+                "→ 안전 방향 True (MOTION_NEEDED)"
+            )
 
         # PRE-CHECK D: 장면 배경 → 강제 MOTION_NEEDED
         if is_scene:

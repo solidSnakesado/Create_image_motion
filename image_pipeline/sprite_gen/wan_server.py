@@ -103,8 +103,12 @@ def api_classify():
             "size_mb": round(size_mb, 2),
         })
 
-    # KEYFRAME_ONLY면 키프레임도 즉시 생성
+    # KEYFRAME_ONLY면 키프레임 + Lottie 즉시 생성
     keyframe_data = None
+    lottie_info = None
+    lottie_path_rel = None
+    combined_lottie_path_rel = None
+
     if result.processing_mode.value == "keyframe_only":
         from image_pipeline.sprite_gen.wan_keyframe_generator import WanKeyframeGenerator
         kf_gen = WanKeyframeGenerator()
@@ -118,6 +122,76 @@ def api_classify():
         keyframe_data = kf_config.to_dict()
         keyframe_data["json_path"] = kf_path
 
+        # ── Lottie 생성 (배경 제거 → 정지 이미지 Lottie → 키프레임 베이크) ──
+        try:
+            from image_pipeline.sprite_gen.wan_lottie_converter import WanLottieConverter
+            from image_pipeline.sprite_gen.wan_lottie_baker import bake_keyframes
+            from PIL import Image as PILImage
+            import numpy as np
+            from scipy import ndimage
+
+            kf_out_dir = os.path.join(DIR_KEYFRAME_ONLY, f"{stem}_transparent")
+            os.makedirs(kf_out_dir, exist_ok=True)
+
+            # 배경 제거
+            img = PILImage.open(image_path).convert("RGBA")
+            arr = np.array(img.convert("RGB"))
+            H, W = arr.shape[:2]
+            border_size = max(3, H // 20)
+            border_px = np.concatenate([
+                arr[:border_size, :, :].reshape(-1, 3),
+                arr[-border_size:, :, :].reshape(-1, 3),
+                arr[:, :border_size, :].reshape(-1, 3),
+                arr[:, -border_size:, :].reshape(-1, 3),
+            ])
+            bg_color = border_px.mean(axis=0)
+            is_bg = np.all(np.abs(arr.astype(int) - bg_color) < 50, axis=2)
+            labeled, _ = ndimage.label(is_bg)
+            border_labels = (
+                set(labeled[0, :].tolist()) | set(labeled[-1, :].tolist()) |
+                set(labeled[:, 0].tolist()) | set(labeled[:, -1].tolist())
+            )
+            border_labels.discard(0)
+            bg_mask = np.zeros((H, W), dtype=bool)
+            for lbl in border_labels:
+                bg_mask |= (labeled == lbl)
+            rgba = np.array(img)
+            rgba[bg_mask, 3] = 0
+            transparent = PILImage.fromarray(rgba, "RGBA")
+
+            # 투명 PNG 복제 (키프레임 duration에 맞춰)
+            fps = 16
+            frame_count = max(2, int(fps * kf_config.duration_ms / 1000))
+            for i in range(frame_count):
+                transparent.save(
+                    os.path.join(kf_out_dir, f"{stem}_frame_{i:04d}.png"), "PNG"
+                )
+
+            # Lottie 생성
+            converter = WanLottieConverter()
+            lottie_abs = os.path.join(DIR_KEYFRAME_ONLY, f"{stem}_lottie.json")
+            converter.convert(
+                png_dir=kf_out_dir, output_path=lottie_abs,
+                fps=fps, loop=kf_config.loop, preset="web",
+            )
+            lottie_path_rel = os.path.relpath(lottie_abs, OUTPUT_DIR)
+
+            # 통합 Lottie (키프레임 베이크)
+            combined_abs = os.path.join(DIR_KEYFRAME_ONLY, f"{stem}_combined.json")
+            bake_keyframes(
+                lottie_path=lottie_abs,
+                keyframe_data=kf_config.to_dict(),
+                output_path=combined_abs,
+            )
+            combined_lottie_path_rel = os.path.relpath(combined_abs, OUTPUT_DIR)
+
+            # Lottie info
+            lottie_info = converter.get_lottie_info(lottie_abs)
+
+            logger.info(f"[Classify] KEYFRAME_ONLY Lottie 생성 완료: {lottie_abs}")
+        except Exception as e:
+            logger.warning(f"[Classify] KEYFRAME_ONLY Lottie 생성 실패: {e}")
+
     return jsonify({
         "processing_mode":  result.processing_mode.value,
         "facing_direction": result.facing_direction.value,
@@ -128,6 +202,9 @@ def api_classify():
         "suggested_action": result.suggested_action,
         "existing_videos":  existing,
         "keyframe_config":  keyframe_data,
+        "lottie_path":      lottie_path_rel,
+        "combined_lottie_path": combined_lottie_path_rel,
+        "lottie_info":      lottie_info,
     })
 
 
@@ -487,8 +564,14 @@ def api_export_combined():
     output_name = data.get("output_name", "")
 
     if not os.path.isabs(lottie_path):
-        anim_root = os.path.join(os.path.expanduser("~"), "anim_pipeline")
-        lottie_path = os.path.join(anim_root, lottie_path)
+        # OUTPUT_DIR 기준 상대경로 먼저 시도 (keyframe_only/..., motion/... 등)
+        candidate = os.path.join(OUTPUT_DIR, lottie_path)
+        if os.path.exists(candidate):
+            lottie_path = candidate
+        else:
+            # anim_pipeline 루트 기준 (outputs/wan/... 등)
+            anim_root = os.path.join(os.path.expanduser("~"), "anim_pipeline")
+            lottie_path = os.path.join(anim_root, lottie_path)
 
     if not os.path.exists(lottie_path):
         return jsonify({"error": f"Lottie 파일 없음: {lottie_path}"}), 404
@@ -515,8 +598,12 @@ def api_export_lottie():
     lottie_path = data.get("lottie_path", "")
 
     if not os.path.isabs(lottie_path):
-        anim_root = os.path.join(os.path.expanduser("~"), "anim_pipeline")
-        lottie_path = os.path.join(anim_root, lottie_path)
+        candidate = os.path.join(OUTPUT_DIR, lottie_path)
+        if os.path.exists(candidate):
+            lottie_path = candidate
+        else:
+            anim_root = os.path.join(os.path.expanduser("~"), "anim_pipeline")
+            lottie_path = os.path.join(anim_root, lottie_path)
 
     if not os.path.exists(lottie_path):
         return jsonify({"error": f"Lottie 파일 없음: {lottie_path}"}), 404
