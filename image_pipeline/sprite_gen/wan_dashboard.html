@@ -373,7 +373,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--sa
 </div>
 
 <script>
-const API = 'http://localhost:5001';
+const API = `http://localhost:${location.port || 5002}`;
 let state = {
   imagePath: '',
   stem: '',
